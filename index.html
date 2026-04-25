@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FertiCal 灌溉液理论计算器</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">FertiCal</p>
+          <h1>理论灌溉液元素浓度</h1>
+          <p class="hero-text">
+            上传水质检测 Excel，分别配置 A/B 桶肥料、母液体积与稀释倍数，页面会自动折算肥料元素含量，并叠加原水背景值，得到理论进液浓度。
+          </p>
+        </div>
+        <div class="hero-metrics">
+          <div class="metric-card">
+            <span class="metric-label">支持文件</span>
+            <strong>.xlsx / .xls / .csv</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">计算输出</span>
+            <strong>元素总量 + mmol/L</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">母液模式</span>
+            <strong>A / B 分桶稀释</strong>
+          </div>
+        </div>
+      </header>
+
+      <main class="layout-grid">
+        <section class="panel panel-accent">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">Step 1</p>
+              <h2>导入水质检测报告</h2>
+            </div>
+            <label class="file-picker">
+              <input id="reportFile" type="file" accept=".xlsx,.xls,.csv" />
+              <span>上传 Excel</span>
+            </label>
+          </div>
+          <p id="reportStatus" class="muted">
+            还没有导入报告。你也可以先手动修改下方水质数据。
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>元素 / 指标</th>
+                  <th>原水值</th>
+                  <th>单位</th>
+                </tr>
+              </thead>
+              <tbody id="waterTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">Step 2</p>
+              <h2>A 桶母液</h2>
+            </div>
+            <button id="addA" class="ghost-btn" type="button">添加肥料</button>
+          </div>
+          <div class="stock-config">
+            <label>
+              <span>母液体积</span>
+              <div class="inline-field">
+                <input id="aTankVolume" type="number" min="0.1" step="0.1" value="100" />
+                <em>L</em>
+              </div>
+            </label>
+            <label>
+              <span>稀释倍数</span>
+              <div class="inline-field">
+                <input id="aDilution" type="number" min="1" step="1" value="100" />
+                <em>x</em>
+              </div>
+            </label>
+          </div>
+          <div id="bucketAList" class="mix-list"></div>
+          <div class="summary-strip" id="summaryA"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">Step 3</p>
+              <h2>B 桶母液</h2>
+            </div>
+            <button id="addB" class="ghost-btn" type="button">添加肥料</button>
+          </div>
+          <div class="stock-config">
+            <label>
+              <span>母液体积</span>
+              <div class="inline-field">
+                <input id="bTankVolume" type="number" min="0.1" step="0.1" value="100" />
+                <em>L</em>
+              </div>
+            </label>
+            <label>
+              <span>稀释倍数</span>
+              <div class="inline-field">
+                <input id="bDilution" type="number" min="1" step="1" value="100" />
+                <em>x</em>
+              </div>
+            </label>
+          </div>
+          <div id="bucketBList" class="mix-list"></div>
+          <div class="summary-strip" id="summaryB"></div>
+        </section>
+
+        <section class="panel panel-wide">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">Step 4</p>
+              <h2>理论灌溉液结果</h2>
+            </div>
+          </div>
+          <div class="result-grid">
+            <article class="result-card">
+              <h3>A/B 配方元素总量</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>元素</th>
+                      <th>A 桶总量 (g)</th>
+                      <th>B 桶总量 (g)</th>
+                      <th>合计 (g)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="elementTotalsBody"></tbody>
+                </table>
+              </div>
+            </article>
+            <article class="result-card">
+              <h3>元素目标值</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>元素</th>
+                      <th>单位</th>
+                      <th>目标值</th>
+                    </tr>
+                  </thead>
+                  <tbody id="targetBody"></tbody>
+                </table>
+              </div>
+            </article>
+            <article class="result-card">
+              <h3>理论进液浓度</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>元素</th>
+                      <th>单位</th>
+                      <th>原水</th>
+                      <th>A 贡献</th>
+                      <th>B 贡献</th>
+                      <th>理论进液</th>
+                      <th>目标值</th>
+                      <th>偏差</th>
+                    </tr>
+                  </thead>
+                  <tbody id="irrigationBody"></tbody>
+                </table>
+              </div>
+            </article>
+            <article class="result-card">
+              <h3>A / B 桶析出风险</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>桶</th>
+                      <th>盐类</th>
+                      <th>Ca (mmol/L)</th>
+                      <th>SO4 / PO4 (mmol/L)</th>
+                      <th>离子积</th>
+                      <th>参考溶度积</th>
+                    </tr>
+                  </thead>
+                  <tbody id="precipitationBody"></tbody>
+                </table>
+              </div>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./node_modules/xlsx/dist/xlsx.full.min.js"></script>
+    <script defer src="./app.js"></script>
+  </body>
+</html>

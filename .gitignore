@@ -1,0 +1,7 @@
+node_modules/
+.npm-cache/
+
+*.xlsx
+*.xls
+~$*.xlsx
+*.DS_Store

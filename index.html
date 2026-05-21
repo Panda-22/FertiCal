@@ -1,205 +1,922 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FertiCal 灌溉液理论计算器</title>
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <div class="page-shell">
-      <header class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">FertiCal</p>
-          <h1>理论灌溉液元素浓度</h1>
-          <p class="hero-text">
-            上传水质检测 Excel，分别配置 A/B 桶肥料、母液体积与稀释倍数，页面会自动折算肥料元素含量，并叠加原水背景值，得到理论进液浓度。
-          </p>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FertiCal · 灌溉液理论浓度计算器</title>
+<style>
+  /* ── Design tokens ──────────────────────────────────────────────────────── */
+  :root {
+    --bg:        #f4f5f0;
+    --bg2:       #eceee9;
+    --card:      #ffffff;
+    --fg:        #1a1f2c;
+    --muted:     #6b7280;
+    --border:    #e0e3e8;
+    --secondary: #f1f3f7;
+    --primary:   #2d3748;
+
+    --a:         #9b1c2b;
+    --a-soft:    #fdf0f1;
+    --a-border:  #f0c4ca;
+    --a-fg:      #7a1622;
+
+    --b:         #1e3a8a;
+    --b-soft:    #eef2fc;
+    --b-border:  #c0cfef;
+    --b-fg:      #1b357a;
+
+    --good:  #16a34a;
+    --warn:  #d97706;
+    --bad:   #dc2626;
+
+    --shadow-sm: 0 1px 3px rgba(20,20,40,.06);
+    --shadow:    0 1px 3px rgba(20,20,40,.06), 0 8px 24px -8px rgba(20,20,40,.10);
+    --shadow-lg: 0 4px 6px rgba(20,20,40,.07), 0 16px 40px -12px rgba(20,20,40,.14);
+    --radius:    14px;
+    --radius-sm: 8px;
+
+    --transition: .18s cubic-bezier(.4,0,.2,1);
+  }
+
+  /* ── Dark mode ──────────────────────────────────────────────────────────── */
+  [data-theme="dark"] {
+    --bg:        #0e1017;
+    --bg2:       #161921;
+    --card:      #1a1d27;
+    --fg:        #e4e8f0;
+    --muted:     #7a8499;
+    --border:    #272b38;
+    --secondary: #20232e;
+    --primary:   #c8d0e4;
+
+    --a-soft:    #1f0c10;
+    --a-border:  #5c1e28;
+
+    --b-soft:    #0c1428;
+    --b-border:  #1c3268;
+
+    --shadow-sm: 0 1px 3px rgba(0,0,0,.25);
+    --shadow:    0 1px 3px rgba(0,0,0,.25), 0 8px 24px -8px rgba(0,0,0,.45);
+    --shadow-lg: 0 4px 6px rgba(0,0,0,.3),  0 16px 40px -12px rgba(0,0,0,.5);
+  }
+
+  /* ── Reset & base ───────────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    transition: background var(--transition), color var(--transition);
+  }
+
+  .shell { max-width: 1200px; margin: 0 auto; padding: 40px 24px 60px; }
+
+  /* ── Hero header ────────────────────────────────────────────────────────── */
+  header.hero {
+    display: flex; flex-wrap: wrap; gap: 24px;
+    justify-content: space-between; align-items: flex-end;
+    margin-bottom: 32px;
+  }
+  .eyebrow {
+    font-size: 11px; font-weight: 600; letter-spacing: .2em;
+    text-transform: uppercase; color: var(--muted); margin: 0;
+  }
+  h1 {
+    font-size: 32px; font-weight: 700; margin: 0;
+    letter-spacing: -.02em;
+    background: linear-gradient(135deg, var(--fg) 40%, var(--muted));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  [data-theme="dark"] h1 {
+    background: linear-gradient(135deg, #e4e8f0 40%, #7a8499);
+    -webkit-background-clip: text; background-clip: text;
+  }
+  .hero-text { color: var(--muted); font-size: 14px; max-width: 640px; margin: 0; }
+  .hero-text .a-text { color: var(--a-fg); font-weight: 600; }
+  .hero-text .b-text { color: var(--b-fg); font-weight: 600; }
+
+  .hero-right { display: flex; flex-direction: column; align-items: flex-end; }
+  .title-row { display: flex; align-items: center; gap: 10px; margin: 6px 0 8px; }
+
+  /* ── Mode selector cards ─────────────────────────────────────────── */
+  .mode-selector { display: flex; gap: 10px; }
+  .mode-card {
+    flex: 1; min-width: 160px;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+    padding: 12px 16px; border-radius: var(--radius);
+    background: var(--card); border: 2px solid var(--border);
+    cursor: pointer; text-align: left;
+    transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+    box-shadow: var(--shadow-sm);
+  }
+  .mode-card:hover { border-color: var(--primary); background: var(--secondary); }
+  .mode-card.is-active {
+    border-color: var(--primary); background: var(--secondary); box-shadow: var(--shadow);
+  }
+  .mode-card-num {
+    font-size: 10px; font-weight: 700; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .mode-card.is-active .mode-card-num { color: var(--primary); }
+  .mode-card-title { font-size: 13px; font-weight: 700; color: var(--fg); }
+  .mode-card-desc { font-size: 11px; color: var(--muted); line-height: 1.4; }
+
+  /* Theme toggle */
+  #themeToggle {
+    width: 36px; height: 36px; padding: 0; display: flex; align-items: center;
+    justify-content: center; font-size: 16px; border-radius: 10px;
+    background: var(--card); border: 1px solid var(--border);
+    cursor: pointer; transition: background var(--transition), border-color var(--transition);
+    flex-shrink: 0;
+  }
+  #themeToggle:hover { background: var(--secondary); }
+
+  /* ── Panel cards ────────────────────────────────────────────────────────── */
+  .panel {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 24px;
+    box-shadow: var(--shadow); margin-bottom: 24px;
+    transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
+  }
+  .panel-a { background: var(--a-soft); border: 2px solid var(--a-border); }
+  .panel-b { background: var(--b-soft); border: 2px solid var(--b-border); }
+
+  .panel-head {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 16px; margin-bottom: 16px;
+  }
+  .panel-head .badge {
+    width: 36px; height: 36px; border-radius: 10px;
+    background: var(--secondary); color: var(--primary);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 700; flex-shrink: 0; font-size: 13px;
+    box-shadow: var(--shadow-sm);
+  }
+  .panel-a .badge { background: var(--a); color: #fff; box-shadow: 0 2px 8px rgba(155,28,43,.35); }
+  .panel-b .badge { background: var(--b); color: #fff; box-shadow: 0 2px 8px rgba(30,58,138,.35); }
+
+  .head-text .kicker {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .18em;
+    color: var(--muted); margin: 0;
+  }
+  .panel-a .head-text .kicker { color: var(--a-fg); }
+  .panel-b .head-text .kicker { color: var(--b-fg); }
+  .head-text h2 { font-size: 18px; margin: 4px 0 4px; font-weight: 600; }
+  .head-text p  { margin: 0; font-size: 13px; color: var(--muted); }
+  .head-row { display: flex; gap: 12px; align-items: flex-start; }
+
+  /* ── Buttons ────────────────────────────────────────────────────────────── */
+  button, .file-picker span {
+    cursor: pointer; border: none; font: inherit;
+    border-radius: var(--radius-sm); padding: 8px 14px; font-size: 13px; font-weight: 500;
+    transition: opacity var(--transition), background var(--transition),
+                box-shadow var(--transition), transform var(--transition);
+  }
+  button:active { transform: scale(.97); }
+
+  .btn-ghost {
+    background: var(--card); border: 1px solid var(--border); color: var(--fg);
+    display: inline-flex; align-items: center; gap: 6px;
+    box-shadow: var(--shadow-sm);
+  }
+  .btn-ghost:hover { background: var(--secondary); }
+
+  .btn-a { background: var(--a); color: #fff; box-shadow: 0 2px 8px rgba(155,28,43,.25); }
+  .btn-b { background: var(--b); color: #fff; box-shadow: 0 2px 8px rgba(30,58,138,.25); }
+  .btn-a:hover { opacity: .9; box-shadow: 0 4px 14px rgba(155,28,43,.35); }
+  .btn-b:hover { opacity: .9; box-shadow: 0 4px 14px rgba(30,58,138,.35); }
+
+  .btn-danger { background: transparent; border: 1px solid var(--border); color: var(--bad); }
+  .btn-danger:hover { background: rgba(220,38,38,.07); }
+
+  .file-picker { position: relative; }
+  .file-picker input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .file-picker span {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--card); border: 1px solid var(--border); color: var(--fg);
+    box-shadow: var(--shadow-sm);
+  }
+  .file-picker:hover span { background: var(--secondary); }
+
+  .muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+
+  /* ── Water / target grid ────────────────────────────────────────────────── */
+  .water-grid {
+    display: grid; gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
+  }
+  .water-cell {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 8px 12px;
+    transition: border-color var(--transition), box-shadow var(--transition);
+  }
+  .water-cell:focus-within {
+    border-color: var(--primary); box-shadow: 0 0 0 2px rgba(45,55,72,.12);
+  }
+  [data-theme="dark"] .water-cell:focus-within {
+    box-shadow: 0 0 0 2px rgba(200,208,228,.15);
+  }
+  .water-cell .el { width: 52px; font-size: 11px; font-weight: 600; flex-shrink: 0; }
+  .water-cell input {
+    flex: 1; border: none; background: transparent; outline: none;
+    text-align: right; font: inherit; font-variant-numeric: tabular-nums;
+    font-size: 13px; min-width: 0; color: var(--fg);
+  }
+  .water-cell .unit { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+  /* ── Stock config ───────────────────────────────────────────────────────── */
+  .stock-config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .stock-config label {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 8px 12px; display: block;
+    transition: border-color var(--transition);
+  }
+  .stock-config label:focus-within { border-color: var(--primary); }
+  .stock-config .lbl { font-size: 11px; color: var(--muted); display: block; }
+  .stock-config .inline { display: flex; align-items: baseline; gap: 4px; margin-top: 2px; }
+  .stock-config input {
+    border: none; background: transparent; outline: none; font: inherit;
+    font-size: 18px; font-weight: 600; width: 100%;
+    font-variant-numeric: tabular-nums; color: var(--fg);
+  }
+  .stock-config .unit { font-size: 11px; color: var(--muted); }
+
+  /* ── Mix list ───────────────────────────────────────────────────────────── */
+  .mix-list { display: flex; flex-direction: column; gap: 8px; }
+  .mix-item {
+    display: flex; flex-direction: column; gap: 6px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 8px 12px;
+    transition: border-color var(--transition), box-shadow var(--transition);
+    animation: slideIn .2s ease;
+  }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .mix-main { display: flex; align-items: center; gap: 8px; }
+  .mix-item select {
+    flex: 1; border: none; background: transparent; outline: none;
+    font: inherit; font-size: 13px; min-width: 0; color: var(--fg);
+    cursor: pointer;
+  }
+  .mix-item .grams {
+    display: inline-flex; align-items: baseline; gap: 4px;
+    background: var(--secondary); border-radius: 6px; padding: 4px 8px;
+    flex-shrink: 0; border: 1px solid var(--border);
+  }
+  .mix-item .grams input {
+    width: 70px; border: none; background: transparent; outline: none;
+    font: inherit; font-size: 13px; font-weight: 600; text-align: right;
+    font-variant-numeric: tabular-nums; color: var(--fg);
+  }
+  .unit-sel {
+    border: none; background: transparent; outline: none;
+    font: inherit; font-size: 11px; color: var(--muted); cursor: pointer;
+  }
+  .mix-item .del {
+    background: transparent; padding: 6px; border-radius: 6px;
+    color: var(--muted); font-size: 14px; line-height: 1; flex-shrink: 0;
+    border: none; box-shadow: none; transition: background var(--transition), color var(--transition);
+  }
+  .mix-item .del:hover { background: rgba(220,38,38,.08); color: var(--bad); transform: none; }
+
+  .compound-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .compound-chip {
+    display: inline-flex; align-items: baseline; gap: 2px;
+    padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 500;
+    background: rgba(0,0,0,.06); color: var(--muted);
+    transition: background var(--transition);
+  }
+  .panel-a .compound-chip { background: rgba(155,28,43,.1);  color: var(--a-fg); }
+  .panel-b .compound-chip { background: rgba(30,58,138,.1);  color: var(--b-fg); }
+  [data-theme="dark"] .compound-chip { background: rgba(255,255,255,.08); }
+  [data-theme="dark"] .panel-a .compound-chip { background: rgba(155,28,43,.2); }
+  [data-theme="dark"] .panel-b .compound-chip { background: rgba(30,58,138,.2); }
+
+  .empty {
+    border: 1px dashed var(--border); border-radius: var(--radius-sm);
+    background: rgba(255,255,255,.4);
+    padding: 20px; text-align: center; color: var(--muted); font-size: 13px;
+  }
+  [data-theme="dark"] .empty { background: rgba(255,255,255,.03); }
+
+  .summary-strip {
+    margin-top: 14px; background: rgba(255,255,255,.55); border-radius: var(--radius-sm);
+    padding: 10px 12px; border: 1px solid rgba(255,255,255,.7);
+  }
+  [data-theme="dark"] .summary-strip {
+    background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.06);
+  }
+  .summary-strip .label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin-bottom: 6px;
+  }
+  .summary-strip .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: baseline; gap: 4px;
+    padding: 3px 8px; border-radius: 6px; font-size: 12px; font-weight: 500;
+    color: #fff;
+  }
+  .panel-a .chip { background: var(--a); }
+  .panel-b .chip { background: var(--b); }
+  .chip .val { font-variant-numeric: tabular-nums; opacity: .92; }
+
+  .bucket-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+
+  .import-grid {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px;
+  }
+
+  /* ── Dialog ─────────────────────────────────────────────────────────────── */
+  dialog {
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 28px; box-shadow: var(--shadow-lg);
+    max-width: 420px; width: calc(100vw - 48px);
+    background: var(--card); color: var(--fg);
+  }
+  dialog::backdrop { background: rgba(10,12,20,.6); backdrop-filter: blur(3px); }
+  dialog h3 { margin: 0 0 20px; font-size: 16px; font-weight: 700; }
+  .dialog-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+  .dialog-field span {
+    font-size: 11px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .08em;
+  }
+  .dialog-field input, .dialog-field textarea {
+    border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 9px 12px;
+    font: inherit; font-size: 13px; outline: none;
+    background: var(--secondary); color: var(--fg);
+    transition: border-color var(--transition), box-shadow var(--transition);
+  }
+  .dialog-field input:focus, .dialog-field textarea:focus {
+    border-color: var(--primary); box-shadow: 0 0 0 2px rgba(45,55,72,.1);
+  }
+  [data-theme="dark"] .dialog-field input:focus,
+  [data-theme="dark"] .dialog-field textarea:focus {
+    box-shadow: 0 0 0 2px rgba(200,208,228,.12);
+  }
+  .dialog-field textarea { resize: vertical; min-height: 64px; }
+  .dialog-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+  /* ── Results section ────────────────────────────────────────────────────── */
+  .mode-bar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  select.btn-ghost { padding: 8px 12px; appearance: auto; }
+
+  .quick-actions {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .quick-actions select { min-width: 150px; }
+
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(120px, 1fr));
+    gap: 10px;
+    margin: 12px 0 16px;
+  }
+  .kpi-card {
+    background: var(--secondary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    min-height: 72px;
+  }
+  .kpi-label {
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .kpi-value {
+    margin-top: 4px;
+    color: var(--fg);
+    font-size: 20px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi-meta {
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  details.target-section {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px 14px; margin-bottom: 16px;
+    transition: border-color var(--transition);
+  }
+  details.target-section summary {
+    cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .1em; user-select: none;
+    list-style: none;
+  }
+  details.target-section summary::before { content: "▶ "; font-size: 9px; }
+  details[open].target-section summary::before { content: "▼ "; }
+  details.target-section .water-grid { margin-top: 12px; }
+
+  /* ── Data table ─────────────────────────────────────────────────────────── */
+  .table-wrap {
+    overflow-x: auto; border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: var(--shadow-sm);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead {
+    background: var(--secondary);
+    font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted);
+    position: sticky; top: 0; z-index: 1;
+  }
+  th, td { padding: 9px 12px; text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th:nth-child(2), td:nth-child(2) { text-align: left; }
+  tbody tr {
+    border-top: 1px solid var(--border);
+    transition: background var(--transition);
+  }
+  tbody tr:hover { background: var(--secondary); }
+  tbody tr:nth-child(even) { background: var(--bg2); }
+  tbody tr:nth-child(even):hover { background: var(--secondary); }
+
+  td.el { font-weight: 600; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .a-col { color: var(--a-fg); font-variant-numeric: tabular-nums; }
+  .b-col { color: var(--b-fg); font-variant-numeric: tabular-nums; }
+  .dev-good { color: var(--good); font-weight: 600; }
+  .dev-warn { color: var(--warn); font-weight: 600; }
+  .dev-bad  { color: var(--bad);  font-weight: 600; }
+
+  /* Flash animation when values update */
+  @keyframes flashUpdate {
+    0%   { background: rgba(45,55,72,.08); }
+    100% { background: transparent; }
+  }
+  .updated { animation: flashUpdate .6s ease forwards; }
+
+  /* ── Result cards ───────────────────────────────────────────────────────── */
+  .result-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; }
+  .result-card {
+    border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+    transition: border-color var(--transition), background var(--transition);
+  }
+  .result-card.card-a { border-top: 3px solid var(--a); }
+  .result-card.card-b { border-top: 3px solid var(--b); }
+  .result-card.card-precip { border-top: 3px solid var(--warn); }
+  .result-card h3 {
+    font-size: 14px; margin: 0 0 12px; font-weight: 600;
+    display: flex; align-items: center; gap: 6px; color: var(--fg);
+  }
+
+  .grams-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .grams-row {
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--secondary); border-radius: 6px; padding: 5px 10px; font-size: 13px;
+    border: 1px solid var(--border);
+  }
+  .grams-row .el-name { font-weight: 600; font-size: 12px; }
+  .grams-row .a { color: var(--a-fg); }
+  .grams-row .b { color: var(--b-fg); margin-left: 8px; }
+  .grams-row .vals { font-variant-numeric: tabular-nums; font-size: 12px; display: flex; gap: 4px; }
+
+  .precip-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+  .precip-row {
+    display: flex; justify-content: space-between; align-items: center;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 8px 12px; font-size: 13px;
+    transition: background var(--transition);
+  }
+  .precip-row:hover { background: var(--secondary); }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+    margin-right: 6px; vertical-align: middle; flex-shrink: 0;
+  }
+  .dot-good { background: var(--good); box-shadow: 0 0 4px rgba(22,163,74,.5); }
+  .dot-warn { background: var(--warn); box-shadow: 0 0 4px rgba(217,119,6,.5); }
+  .dot-bad  { background: var(--bad);  box-shadow: 0 0 4px rgba(220,38,38,.5); }
+  .precip-meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .suggestion-panel {
+    display: none;
+    margin: 14px 0 18px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    background: var(--secondary);
+  }
+  .suggestion-panel.is-visible { display: block; }
+  .suggestion-head {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 12px; margin-bottom: 10px;
+  }
+  .suggestion-head h3 { margin: 0; font-size: 14px; }
+  .suggestion-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .suggestion-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+  }
+  .suggestion-card.is-selected {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(37,99,235,.12);
+  }
+  .suggestion-card h4 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .suggestion-meta {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.6;
+    margin-bottom: 8px;
+  }
+  .suggestion-buckets {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .suggestion-bucket {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .suggestion-bucket b {
+    color: var(--fg);
+    display: block;
+    margin-bottom: 4px;
+  }
+  .suggestion-bucket ul {
+    margin: 0;
+    padding-left: 14px;
+  }
+  .suggestion-bucket li {
+    margin: 2px 0;
+  }
+  .suggestion-export {
+    display: flex;
+    align-items: end;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .suggestion-export label {
+    display: grid;
+    gap: 5px;
+    min-width: 120px;
+  }
+  .suggestion-export label span {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .suggestion-export select {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--secondary);
+    color: var(--fg);
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+  }
+  .inventory-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .inventory-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+  .inventory-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+  .inventory-item input { margin-top: 2px; flex-shrink: 0; }
+  .inventory-item span { display: block; color: var(--muted); font-size: 11px; }
+
+  /* ── Responsive ─────────────────────────────────────────────────────────── */
+  @media (max-width: 900px) {
+    .bucket-grid      { grid-template-columns: 1fr; }
+    .water-grid       { grid-template-columns: repeat(2, 1fr); }
+    .result-grid      { grid-template-columns: 1fr; }
+    .suggestion-grid  { grid-template-columns: 1fr; }
+    .kpi-grid         { grid-template-columns: repeat(3, 1fr); }
+    .grams-grid       { grid-template-columns: 1fr; }
+    h1                { font-size: 26px; }
+    .hero-right       { align-items: flex-start; }
+  }
+  @media (max-width: 600px) {
+    .shell { padding: 20px 16px 40px; }
+    .panel { padding: 16px; }
+    .hero  { margin-bottom: 20px; }
+    .btn-ghost { padding: 7px 10px; font-size: 12px; }
+    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .suggestion-buckets { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── Hero ──────────────────────────────────────────────────────────────── -->
+  <header class="hero">
+    <div>
+      <p class="eyebrow">FertiCal</p>
+      <div class="title-row">
+        <h1>理论灌溉液元素浓度</h1>
+        <button id="themeToggle" title="切换明暗模式">🌙</button>
+      </div>
+      <p id="heroText" class="hero-text">
+        上传水质检测报告，分别配置 <span class="a-text">A 桶</span> 与 <span class="b-text">B 桶</span>
+        肥料、母液体积与稀释倍数。页面实时折算肥料元素含量，叠加原水背景，得到根区理论进液浓度。
+      </p>
+    </div>
+    <div class="hero-right">
+      <div class="mode-selector">
+        <button class="mode-card is-active" id="modeBtn1">
+          <div class="mode-card-num">功能 01</div>
+          <div class="mode-card-title">计算工作液浓度</div>
+          <div class="mode-card-desc">已有配方，查看各元素理论浓度</div>
+        </button>
+        <button class="mode-card" id="modeBtn2">
+          <div class="mode-card-num">功能 02</div>
+          <div class="mode-card-title">设计施肥配方</div>
+          <div class="mode-card-desc">输入目标浓度，自动推荐配方方案</div>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Step 01: Water quality ─────────────────────────────────────────────── -->
+  <section id="waterSection" class="panel" style="display:none">
+    <div class="panel-head">
+      <div class="head-row">
+        <div class="badge">01</div>
+        <div class="head-text">
+          <p class="kicker">Step 01</p>
+          <h2>水质背景</h2>
+          <p>上传水质报告或直接编辑下方原水值</p>
         </div>
-        <div class="hero-metrics">
-          <div class="metric-card">
-            <span class="metric-label">支持文件</span>
-            <strong>.xlsx / .xls / .csv</strong>
-          </div>
-          <div class="metric-card">
-            <span class="metric-label">计算输出</span>
-            <strong>元素总量 + mmol/L</strong>
-          </div>
-          <div class="metric-card">
-            <span class="metric-label">母液模式</span>
-            <strong>A / B 分桶稀释</strong>
+      </div>
+      <label class="file-picker">
+        <input id="reportFile" type="file" accept=".xlsx,.xls,.csv" />
+        <span>⬆ 导入 Excel</span>
+      </label>
+    </div>
+    <p id="reportStatus" class="muted">还未导入报告 · 支持 .xlsx / .xls / .csv</p>
+    <div id="waterGrid" class="water-grid"></div>
+  </section>
+
+  <section id="importPanel" class="panel" style="display:none">
+    <div class="panel-head">
+      <div class="head-row">
+        <div class="badge">导</div>
+        <div class="head-text">
+          <p class="kicker">Import</p>
+          <h2>目标与实际配方导入</h2>
+          <p>导入目标元素浓度与实际配方文件，自动填入目标值和 A/B 桶肥料用量</p>
+        </div>
+      </div>
+      <div class="import-grid">
+        <label class="file-picker">
+          <input id="targetFile" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff" />
+          <span>导入目标文件</span>
+        </label>
+        <label class="file-picker">
+          <input id="formulaFile" type="file" accept=".xlsx,.xls,.csv,.txt,.pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff" />
+          <span>导入配方文件</span>
+        </label>
+      </div>
+    </div>
+    <p id="targetImportStatus" class="muted">目标文件支持 PDF / Excel / CSV / TXT / 图片 OCR</p>
+    <p id="formulaImportStatus" class="muted">配方文件支持 Excel / CSV / TXT / PDF / 图片 OCR，建议包含 A桶/B桶、名称、kg/100L</p>
+  </section>
+
+  <!-- ── Steps 02 & 03: Buckets ─────────────────────────────────────────────── -->
+  <div id="bucketGrid" class="bucket-grid" style="display:none">
+    <section class="panel panel-a">
+      <div class="panel-head">
+        <div class="head-row">
+          <div class="badge">A</div>
+          <div class="head-text">
+            <p class="kicker">Step 02</p>
+            <h2>A 桶母液</h2>
+            <p>钙、铁、硝态氮组</p>
           </div>
         </div>
-      </header>
+        <button id="addA" class="btn-a">+ 添加肥料</button>
+      </div>
+      <div class="stock-config">
+        <label>
+          <span class="lbl">母液体积</span>
+          <div class="inline">
+            <input id="aTankVolume" type="number" min="0.1" step="0.1" value="100">
+            <span class="unit">L</span>
+          </div>
+        </label>
+        <label>
+          <span class="lbl">稀释倍数</span>
+          <div class="inline">
+            <span class="unit">1 :</span>
+            <input id="aDilution" type="number" min="1" step="1" value="100">
+          </div>
+        </label>
+      </div>
+      <div id="bucketAList" class="mix-list"></div>
+      <div id="summaryA" class="summary-strip" style="display:none">
+        <div class="label">稀释后贡献 (g 总量)</div>
+        <div class="chips"></div>
+      </div>
+    </section>
 
-      <main class="layout-grid">
-        <section class="panel panel-accent">
-          <div class="panel-head">
-            <div>
-              <p class="section-kicker">Step 1</p>
-              <h2>导入水质检测报告</h2>
-            </div>
-            <label class="file-picker">
-              <input id="reportFile" type="file" accept=".xlsx,.xls,.csv" />
-              <span>上传 Excel</span>
-            </label>
+    <section class="panel panel-b">
+      <div class="panel-head">
+        <div class="head-row">
+          <div class="badge">B</div>
+          <div class="head-text">
+            <p class="kicker">Step 03</p>
+            <h2>B 桶母液</h2>
+            <p>磷、硫、镁、微量元素组</p>
           </div>
-          <p id="reportStatus" class="muted">
-            还没有导入报告。你也可以先手动修改下方水质数据。
-          </p>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>元素 / 指标</th>
-                  <th>原水值</th>
-                  <th>单位</th>
-                </tr>
-              </thead>
-              <tbody id="waterTableBody"></tbody>
-            </table>
+        </div>
+        <button id="addB" class="btn-b">+ 添加肥料</button>
+      </div>
+      <div class="stock-config">
+        <label>
+          <span class="lbl">母液体积</span>
+          <div class="inline">
+            <input id="bTankVolume" type="number" min="0.1" step="0.1" value="100">
+            <span class="unit">L</span>
           </div>
-        </section>
+        </label>
+        <label>
+          <span class="lbl">稀释倍数</span>
+          <div class="inline">
+            <span class="unit">1 :</span>
+            <input id="bDilution" type="number" min="1" step="1" value="100">
+          </div>
+        </label>
+      </div>
+      <div id="bucketBList" class="mix-list"></div>
+      <div id="summaryB" class="summary-strip" style="display:none">
+        <div class="label">稀释后贡献 (g 总量)</div>
+        <div class="chips"></div>
+      </div>
+    </section>
+  </div>
 
-        <section class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="section-kicker">Step 2</p>
-              <h2>A 桶母液</h2>
-            </div>
-            <button id="addA" class="ghost-btn" type="button">添加肥料</button>
-          </div>
-          <div class="stock-config">
-            <label>
-              <span>母液体积</span>
-              <div class="inline-field">
-                <input id="aTankVolume" type="number" min="0.1" step="0.1" value="100" />
-                <em>L</em>
-              </div>
-            </label>
-            <label>
-              <span>稀释倍数</span>
-              <div class="inline-field">
-                <input id="aDilution" type="number" min="1" step="1" value="100" />
-                <em>x</em>
-              </div>
-            </label>
-          </div>
-          <div id="bucketAList" class="mix-list"></div>
-          <div class="summary-strip" id="summaryA"></div>
-        </section>
+  <!-- ── Mode 2 only: Target elements input ───────────────────────────────── -->
+  <section id="mode2TargetSection" class="panel" style="display:none">
+    <div class="panel-head">
+      <div class="head-row">
+        <div class="badge">02</div>
+        <div class="head-text">
+          <p class="kicker">Step 02</p>
+          <h2>目标元素浓度</h2>
+          <p>设定灌溉液中各元素的目标浓度，系统将自动生成配方建议</p>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="targetPreset2" class="btn-ghost">
+          <option value="">目标预设</option>
+        </select>
+        <button id="clearTargets2" class="btn-ghost">清空</button>
+        <label class="file-picker">
+          <input id="targetFileM2" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff" />
+          <span>导入目标文件</span>
+        </label>
+      </div>
+    </div>
+    <p id="mode2TargetStatus" class="muted">设定目标浓度后将自动生成 3 套配方建议 · 支持 PDF / Excel / 图片 OCR</p>
+    <div id="mode2TargetGrid" class="water-grid"></div>
+  </section>
 
-        <section class="panel">
-          <div class="panel-head">
-            <div>
-              <p class="section-kicker">Step 3</p>
-              <h2>B 桶母液</h2>
-            </div>
-            <button id="addB" class="ghost-btn" type="button">添加肥料</button>
-          </div>
-          <div class="stock-config">
-            <label>
-              <span>母液体积</span>
-              <div class="inline-field">
-                <input id="bTankVolume" type="number" min="0.1" step="0.1" value="100" />
-                <em>L</em>
-              </div>
-            </label>
-            <label>
-              <span>稀释倍数</span>
-              <div class="inline-field">
-                <input id="bDilution" type="number" min="1" step="1" value="100" />
-                <em>x</em>
-              </div>
-            </label>
-          </div>
-          <div id="bucketBList" class="mix-list"></div>
-          <div class="summary-strip" id="summaryB"></div>
-        </section>
-
-        <section class="panel panel-wide">
-          <div class="panel-head">
-            <div>
-              <p class="section-kicker">Step 4</p>
-              <h2>理论灌溉液结果</h2>
-            </div>
-          </div>
-          <div class="result-grid">
-            <article class="result-card">
-              <h3>A/B 配方元素总量</h3>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>元素</th>
-                      <th>A 桶总量 (g)</th>
-                      <th>B 桶总量 (g)</th>
-                      <th>合计 (g)</th>
-                    </tr>
-                  </thead>
-                  <tbody id="elementTotalsBody"></tbody>
-                </table>
-              </div>
-            </article>
-            <article class="result-card">
-              <h3>元素目标值</h3>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>元素</th>
-                      <th>单位</th>
-                      <th>目标值</th>
-                    </tr>
-                  </thead>
-                  <tbody id="targetBody"></tbody>
-                </table>
-              </div>
-            </article>
-            <article class="result-card">
-              <h3>理论进液浓度</h3>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>元素</th>
-                      <th>单位</th>
-                      <th>原水</th>
-                      <th>A 贡献</th>
-                      <th>B 贡献</th>
-                      <th>理论进液</th>
-                      <th>目标值</th>
-                      <th>偏差</th>
-                    </tr>
-                  </thead>
-                  <tbody id="irrigationBody"></tbody>
-                </table>
-              </div>
-            </article>
-            <article class="result-card">
-              <h3>A / B 桶析出风险</h3>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>桶</th>
-                      <th>盐类</th>
-                      <th>Ca (mmol/L)</th>
-                      <th>SO4 / PO4 (mmol/L)</th>
-                      <th>离子积</th>
-                      <th>参考溶度积</th>
-                    </tr>
-                  </thead>
-                  <tbody id="precipitationBody"></tbody>
-                </table>
-              </div>
-            </article>
-          </div>
-        </section>
-      </main>
+  <!-- ── Step 04: Results ───────────────────────────────────────────────────── -->
+  <section id="resultsSection" class="panel" style="display:none">
+    <div class="panel-head">
+      <div class="head-row">
+        <div class="badge" id="resultsBadge">04</div>
+        <div class="head-text">
+          <p class="kicker" id="resultsKicker">Step 04</p>
+          <h2 id="resultsPanelTitle">理论灌溉液结果</h2>
+          <p id="resultsPanelSubtitle">原水背景 + A/B 桶稀释贡献 = 进入根区的理论浓度</p>
+        </div>
+      </div>
+      <div id="resultsModeBar" class="mode-bar">
+        <div class="quick-actions">
+          <select id="targetPreset" class="btn-ghost">
+            <option value="">目标预设</option>
+          </select>
+          <button id="clearTargets" class="btn-ghost">清空目标</button>
+        </div>
+        <select id="calcMode" class="btn-ghost">
+          <option value="forward">正向计算</option>
+          <option value="reverse">反向优化</option>
+        </select>
+        <button id="startCalc" class="btn-ghost">▶ 计算</button>
+        <button id="exportResults" class="btn-ghost">导出结果</button>
+      </div>
     </div>
 
-    <script src="./node_modules/xlsx/dist/xlsx.full.min.js"></script>
-    <script defer src="./app.js"></script>
-  </body>
+    <details id="targetDetails" class="target-section">
+      <summary>目标浓度设定（点击展开）</summary>
+      <div id="targetGrid" class="water-grid"></div>
+    </details>
+
+    <details id="inventoryDetails" class="target-section">
+      <summary>库存肥料设定（点击展开）</summary>
+      <div class="inventory-actions">
+        <button id="selectAllInventory" class="btn-ghost" type="button">全选</button>
+        <button id="clearAllInventory" class="btn-ghost" type="button">全不选</button>
+      </div>
+      <div id="inventoryGrid" class="inventory-grid"></div>
+    </details>
+
+    <p id="calcStatus" class="muted"></p>
+    <div id="reverseSuggestions" class="suggestion-panel"></div>
+    <div id="kpiGrid" class="kpi-grid"></div>
+
+    <div id="tableWrap" class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>元素</th>
+            <th>单位</th>
+            <th>原水</th>
+            <th class="a-col">A 贡献</th>
+            <th class="b-col">B 贡献</th>
+            <th>合计</th>
+            <th>目标</th>
+            <th>偏差</th>
+          </tr>
+        </thead>
+        <tbody id="irrigationBody"></tbody>
+      </table>
+    </div>
+
+    <div id="resultGrid" class="result-grid">
+      <div class="result-card card-a">
+        <h3><span style="color:var(--a)">A</span> / <span style="color:var(--b)">B</span> 桶元素总量 (g)</h3>
+        <div id="elementTotalsGrid" class="grams-grid"></div>
+      </div>
+      <div class="result-card card-precip">
+        <h3 id="precipTitle">⚠ 析出风险</h3>
+        <ul id="precipList" class="precip-list"></ul>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script src="node_modules/xlsx/dist/xlsx.full.min.js"></script>
+<script>
+  /* ── Theme toggle (runs before app.js so theme applies immediately) ── */
+  (function () {
+    const root   = document.documentElement;
+    const btn    = document.getElementById('themeToggle');
+    const stored = localStorage.getItem('fertical-theme');
+    const pref   = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    const theme  = stored || pref;
+    root.setAttribute('data-theme', theme);
+    btn.textContent = theme === 'dark' ? '☀️' : '🌙';
+
+    btn.addEventListener('click', () => {
+      const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      localStorage.setItem('fertical-theme', next);
+      btn.textContent = next === 'dark' ? '☀️' : '🌙';
+    });
+  })();
+</script>
+<script>
+  (function () {
+    const script = document.createElement('script');
+    script.src = `app.js?v=${Date.now()}`;
+    document.body.appendChild(script);
+  })();
+</script>
+</body>
 </html>

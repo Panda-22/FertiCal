@@ -69,11 +69,11 @@ body::before {
 }
 
 .hero h1 {
-  margin: 12px 0 16px;
-  max-width: 12ch;
+  margin: 10px 0 14px;
+  max-width: 18ch;
   font-family: "Iowan Old Style", "Songti SC", "STSong", serif;
-  font-size: clamp(2.5rem, 5vw, 4.5rem);
-  line-height: 0.95;
+  font-size: clamp(1rem, 4vw, 3rem);
+  line-height: 0.8;
   font-weight: 700;
 }
 

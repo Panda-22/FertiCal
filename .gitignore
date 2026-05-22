@@ -5,3 +5,13 @@ node_modules/
 *.xls
 ~$*.xlsx
 *.DS_Store
+
+# 数据库文件（运行时生成）
+fertical.db
+
+# IDE / AI 配置
+.claude/
+
+# Python 缓存
+__pycache__/
+*.pyc

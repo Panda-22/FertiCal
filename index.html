@@ -203,6 +203,13 @@
     box-shadow: var(--shadow-sm);
   }
   .file-picker:hover span { background: var(--secondary); }
+  .water-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .water-actions .btn-ghost { height: 42px; }
+  .water-actions .btn-ghost.is-active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: var(--card);
+  }
 
   .muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
 
@@ -685,10 +692,13 @@
           <p>上传水质报告或直接编辑下方原水值</p>
         </div>
       </div>
-      <label class="file-picker">
-        <input id="reportFile" type="file" accept=".xlsx,.xls,.csv" />
-        <span>⬆ 导入 Excel</span>
-      </label>
+      <div class="water-actions">
+        <label class="file-picker">
+          <input id="reportFile" type="file" accept=".xlsx,.xls,.csv" />
+          <span>⬆ 导入 Excel</span>
+        </label>
+        <button id="roWater" class="btn-ghost" type="button">RO水灌溉</button>
+      </div>
     </div>
     <p id="reportStatus" class="muted">还未导入报告 · 支持 .xlsx / .xls / .csv</p>
     <div id="waterGrid" class="water-grid"></div>

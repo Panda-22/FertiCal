@@ -611,6 +611,7 @@ const state = {
   inventory: Object.fromEntries(FERTILIZER_CATALOG.map((item) => [item.id, true])),
   reverseSuggestions: [],
   selectedReverseIndex: null,
+  isRoWater: false,
   bucketA: [],
   bucketB: []
 };
@@ -631,6 +632,7 @@ const precipList = document.querySelector("#precipList");
 const reverseSuggestionsEl = document.querySelector("#reverseSuggestions");
 const reportStatus = document.querySelector("#reportStatus");
 const reportFile = document.querySelector("#reportFile");
+const roWaterBtn = document.querySelector("#roWater");
 const targetFile = document.querySelector("#targetFile");
 const formulaFile = document.querySelector("#formulaFile");
 const targetImportStatus = document.querySelector("#targetImportStatus");
@@ -639,8 +641,6 @@ const formulaImportStatus = document.querySelector("#formulaImportStatus");
 init();
 
 function init() {
-  state.bucketA = [buildRow("A"), buildRow("A")];
-  state.bucketB = [buildRow("B"), buildRow("B")];
   renderWaterTable();
   renderTargetTable();
   renderInventoryGrid();
@@ -673,6 +673,7 @@ function bindStaticEvents() {
   });
 
   reportFile.addEventListener("change", handleReportUpload);
+  roWaterBtn?.addEventListener("click", applyRoWater);
   targetFile?.addEventListener("change", handleTargetUpload);
   formulaFile?.addEventListener("change", handleFormulaUpload);
 
@@ -720,11 +721,17 @@ function getCatalogByBucket(bucket) {
 }
 
 function renderWaterTable() {
-  waterGrid.innerHTML = ELEMENT_META.map((item) => `
+  const visibleItems = state.isRoWater
+    ? ELEMENT_META.filter((item) => item.key !== "pH")
+    : ELEMENT_META;
+
+  roWaterBtn?.classList.toggle("is-active", state.isRoWater);
+
+  waterGrid.innerHTML = visibleItems.map((item) => `
     <label class="water-cell">
       <span class="el">${item.key}</span>
       <input data-water-key="${item.key}" type="number" step="0.001"
-        value="${toInputValue(state.water[item.key])}" />
+        value="${state.isRoWater ? "0" : toInputValue(state.water[item.key])}" />
       <span class="unit">${item.unit || ""}</span>
     </label>
   `).join("");
@@ -734,13 +741,28 @@ function renderWaterTable() {
       const key = event.target.dataset.waterKey;
       clearReverseSelection();
       state.water[key] = toNumber(event.target.value);
+      const shouldRestorePh = state.isRoWater;
+      if (shouldRestorePh) state.isRoWater = false;
       if (key === "NO3-N" || key === "NH4-N") {
         syncWaterTotalN();
+        renderWaterTable();
+      } else if (shouldRestorePh) {
         renderWaterTable();
       }
       recalculate();
     });
   });
+}
+
+function applyRoWater() {
+  ELEMENT_META.forEach((item) => {
+    state.water[item.key] = 0;
+  });
+  state.isRoWater = true;
+  clearReverseSelection();
+  renderWaterTable();
+  recalculate();
+  reportStatus.textContent = "已选择 RO水灌溉 · 水中各元素浓度按 0 计算";
 }
 
 function renderBucket(bucket) {
@@ -803,12 +825,8 @@ function renderBucket(bucket) {
 
     root.querySelector('[data-role="remove"]').addEventListener("click", () => {
       const targetRows = bucket === "A" ? state.bucketA : state.bucketB;
-      if (targetRows.length === 1) {
-        targetRows[0] = buildRow(bucket);
-      } else {
-        const index = targetRows.findIndex((item) => item.id === row.id);
-        targetRows.splice(index, 1);
-      }
+      const index = targetRows.findIndex((item) => item.id === row.id);
+      targetRows.splice(index, 1);
       renderBucket(bucket);
       recalculate();
     });
@@ -1275,6 +1293,7 @@ async function handleReportUpload(event) {
     const workbook = XLSX.read(buffer, { type: "array" });
     const parsed = parseWorkbook(workbook);
     Object.assign(state.water, parsed.values);
+    state.isRoWater = false;
     clearReverseSelection();
     syncWaterTotalN();
     renderWaterTable();
@@ -1344,8 +1363,8 @@ async function handleFormulaUpload(event) {
       throw new Error("未识别到 A桶/B桶肥料行");
     }
 
-    state.bucketA = parsed.bucketA.length ? parsed.bucketA : [buildRow("A")];
-    state.bucketB = parsed.bucketB.length ? parsed.bucketB : [buildRow("B")];
+    state.bucketA = parsed.bucketA;
+    state.bucketB = parsed.bucketB;
     clearReverseSelection();
 
     if (parsed.aVolume) document.querySelector("#aTankVolume").value = parsed.aVolume;
@@ -2417,10 +2436,10 @@ function applyReverseSuggestion(suggestion, index = null) {
   state.selectedReverseIndex = index;
   state.bucketA = suggestion.bucketA.length
     ? suggestion.bucketA.map((row) => ({ ...row, id: crypto.randomUUID() }))
-    : [buildRow("A")];
+    : [];
   state.bucketB = suggestion.bucketB.length
     ? suggestion.bucketB.map((row) => ({ ...row, id: crypto.randomUUID() }))
-    : [buildRow("B")];
+    : [];
 
   renderBucket("A");
   renderBucket("B");

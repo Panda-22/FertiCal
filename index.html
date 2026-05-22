@@ -396,6 +396,9 @@
     letter-spacing: .08em;
     text-transform: uppercase;
   }
+  .kpi-label.keep-case {
+    text-transform: none;
+  }
   .kpi-value {
     margin-top: 4px;
     color: var(--fg);
@@ -891,7 +894,7 @@
   </section>
 </div>
 
-<script src="node_modules/xlsx/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
   /* ── Theme toggle (runs before app.js so theme applies immediately) ── */
   (function () {

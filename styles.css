@@ -304,6 +304,18 @@ select:focus {
   min-width: 120px;
 }
 
+.water-group-title {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.water-group-title:first-child {
+  margin-top: 0;
+}
+
 .target-input {
   min-width: 110px;
 }

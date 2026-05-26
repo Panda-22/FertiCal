@@ -6,6 +6,7 @@ FertiCal 本地后端
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from typing import Optional
@@ -14,13 +15,6 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
-from feishu import (
-    get_tenant_access_token,
-    list_all_records,
-    parse_bitable_url,
-    records_to_water_reports,
-)
 
 # ── 路径配置 ────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -51,7 +45,6 @@ def init_db():
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
             name             TEXT NOT NULL,
             tested_at        DATE,
-            feishu_record_id TEXT UNIQUE,
             no3_n  REAL DEFAULT 0, nh4_n REAL DEFAULT 0, n  REAL DEFAULT 0,
             p      REAL DEFAULT 0, k     REAL DEFAULT 0, ca REAL DEFAULT 0,
             mg     REAL DEFAULT 0, s     REAL DEFAULT 0, cl REAL DEFAULT 0,
@@ -84,27 +77,35 @@ def init_db():
             measured_at      DATETIME,
             measured_ec      REAL,
             measured_ph      REAL,
+            predicted_ec     REAL,
+            predicted_ph     REAL,
             element_actuals  TEXT DEFAULT '{}',
+            water_snapshot   TEXT DEFAULT '{}',
+            formula_snapshot TEXT DEFAULT '{}',
+            total_mmol       TEXT DEFAULT '{}',
+            acid_profile     TEXT DEFAULT '{}',
             notes            TEXT,
             created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
         );
-
-        CREATE TABLE IF NOT EXISTS sync_log (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            synced_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-            records_added    INTEGER DEFAULT 0,
-            status           TEXT,
-            message          TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS settings (
-            key   TEXT PRIMARY KEY,
-            value TEXT
-        );
     """)
+    ensure_columns(conn, "titration_results", {
+        "predicted_ec": "REAL",
+        "predicted_ph": "REAL",
+        "water_snapshot": "TEXT DEFAULT '{}'",
+        "formula_snapshot": "TEXT DEFAULT '{}'",
+        "total_mmol": "TEXT DEFAULT '{}'",
+        "acid_profile": "TEXT DEFAULT '{}'",
+    })
     conn.commit()
     conn.close()
     print(f"[FertiCal] 数据库已就绪：{os.path.abspath(DB_PATH)}")
+
+
+def ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]):
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
 init_db()
@@ -141,16 +142,64 @@ class TitrationSave(BaseModel):
     measured_at: Optional[str] = None
     measured_ec: Optional[float] = None
     measured_ph: Optional[float] = None
+    predicted_ec: Optional[float] = None
+    predicted_ph: Optional[float] = None
     element_actuals: dict = {}
+    water_snapshot: dict = {}
+    formula_snapshot: dict = {}
+    total_mmol: dict = {}
+    acid_profile: dict = {}
     notes: Optional[str] = None
 
 
 TARGET_ORDER = [
-    "EC", "NH4-N", "K", "Ca", "Mg", "NO3-N", "Cl", "S", "P",
+    "EC", "NH4-N", "K", "Ca", "Mg", "NO3-N", "Cl", "S", "P", "HCO3", "CO3",
     "Fe", "Mn", "Zn", "B", "Cu", "Mo",
 ]
 
 MICRO_TARGET_KEYS = {"Fe", "Mn", "Zn", "B", "Cu", "Mo"}
+
+DETECTION_RULES: list[tuple[str, list[str]]] = [
+    ("NO3-N", [r"no3", r"硝态氮", r"硝酸盐", r"硝氮"]),
+    ("NH4-N", [r"nh4", r"铵态氮", r"铵氮", r"氨氮", r"nh3"]),
+    ("N", [r"\bn\b", r"总氮", r"全氮"]),
+    ("P", [r"\bp\b", r"以p计", r"磷"]),
+    ("K", [r"\bk\b", r"以k计", r"钾"]),
+    ("Ca", [r"\bca\b", r"钙"]),
+    ("Mg", [r"\bmg\b", r"镁"]),
+    ("S", [r"\bs\b", r"以s计", r"硫"]),
+    ("Cl", [r"\bcl\b", r"氯"]),
+    ("Fe", [r"\bfe\b", r"铁"]),
+    ("Mn", [r"\bmn\b", r"锰"]),
+    ("Zn", [r"\bzn\b", r"锌"]),
+    ("B", [r"\bb\b", r"硼"]),
+    ("Cu", [r"\bcu\b", r"铜"]),
+    ("Mo", [r"\bmo\b", r"钼"]),
+    ("Na", [r"\bna\b", r"钠"]),
+    ("Si", [r"\bsi\b", r"硅"]),
+    ("HCO3", [r"hco3", r"碳酸氢根", r"重碳酸根"]),
+    ("CO3", [r"(^|[^h])co3", r"碳酸根"]),
+    ("EC", [r"\bec\b", r"电导率"]),
+    ("pH", [r"\bph\b"]),
+]
+
+
+def detect_element_key(text: str) -> Optional[str]:
+    text = str(text).strip()
+    for key, patterns in DETECTION_RULES:
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
+            return key
+    return None
+
+
+def _to_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        num = float(str(value).replace(",", "").strip())
+        return num if num >= 0 else None
+    except (TypeError, ValueError):
+        return None
 
 FERTILIZER_ALIASES = {
     "ca-no3-4h2o": ["硝酸钙", "四水硝酸钙", "Ca(NO3)2"],
@@ -194,6 +243,22 @@ async def import_target(request: Request):
         return {"values": values, "source": filename}
     except Exception as exc:
         raise HTTPException(400, f"目标文件解析失败：{exc}")
+
+
+@app.post("/api/import/water")
+async def import_water(request: Request):
+    try:
+        from urllib.parse import unquote
+
+        filename = unquote(request.headers.get("x-filename", "water-report"))
+        content = await request.body()
+        text = extract_upload_text(filename, content)
+        values = parse_water_text(text)
+        if not values:
+            raise ValueError("未识别到水质指标数据行")
+        return {"values": values, "source": filename}
+    except Exception as exc:
+        raise HTTPException(400, f"水质报告解析失败：{exc}")
 
 
 @app.post("/api/import/target-pdf")
@@ -300,11 +365,8 @@ def decode_text(content: bytes) -> str:
 def parse_target_text(text: str) -> dict:
     """
     通用目标浓度解析：支持宽表格（表头行 + 数值行）、长表格（每行一个元素）两种格式。
-    使用与飞书同步相同的 DETECTION_RULES 进行元素名称模糊匹配，不依赖特定文档格式。
+    使用通用元素识别规则进行元素名称模糊匹配，不依赖特定文档格式。
     """
-    import re
-    from feishu import detect_element_key, _to_float
-
     values: dict[str, float] = {}
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
@@ -334,6 +396,8 @@ def parse_target_text(text: str) -> dict:
         ion_map = {
             "nh4": "NH4-N",
             "no3": "NO3-N",
+            "hco3": "HCO3",
+            "co3": "CO3",
             "h2po4": "P",
             "po4": "P",
             "so4": "S",
@@ -451,6 +515,104 @@ def _post_process_targets(values: dict) -> dict:
 
 
 parse_target_pdf_text = parse_target_text
+
+
+def parse_water_text(text: str) -> dict:
+    row_values = parse_water_report_rows(text)
+    if row_values:
+        return _post_process_targets(row_values)
+    return parse_target_text(text)
+
+
+def parse_water_report_rows(text: str) -> dict:
+    values: dict[str, float] = {}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    for line in lines:
+        key = detect_water_report_key(line)
+        if not key or key in values:
+            continue
+
+        value = extract_water_report_value(line, key)
+        if value is not None:
+            values[key] = value
+
+    return values
+
+
+def detect_water_report_key(line: str) -> Optional[str]:
+    text = str(line)
+    compact = re.sub(r"\s+", "", text, flags=re.I)
+    lowered = compact.lower()
+    leading_no = re.match(r"^\s*(\d{1,2})\b", text)
+    row_no = int(leading_no.group(1)) if leading_no else None
+
+    if re.search(r"nh\s*4?\s*[-－]?\s*n|nhn|铵", lowered, re.I):
+        return "NH4-N"
+    if re.search(r"no\s*[3:：;]?\s*[-－]?\s*n|硝", lowered, re.I):
+        return "NO3-N"
+    if re.search(r"hco\s*[3:：;]?", lowered, re.I) or "碳酸氢" in compact:
+        return "HCO3"
+    if re.search(r"(^|[^h])co\s*[3:：;]?", lowered, re.I) or "碳酸盐" in compact or "碳酸根" in compact:
+        return "CO3"
+    if re.search(r"so\s*[4:：.;]?\s*[-－]?\s*s", lowered, re.I) or "硫酸" in compact:
+        return "S"
+    if re.search(r"\(\s*c?k\s*\)|\bk\b|钾", lowered, re.I):
+        return "K"
+    if re.search(r"\bph\b|酸碱", lowered, re.I):
+        return "pH"
+    if re.search(r"\bec\b|电导", lowered, re.I):
+        return "EC"
+
+    for symbol, key in {
+        "ca": "Ca", "mg": "Mg", "na": "Na", "cl": "Cl", "cu": "Cu",
+        "fe": "Fe", "mn": "Mn", "zn": "Zn", "mo": "Mo", "si": "Si",
+        "p": "P", "b": "B",
+    }.items():
+        if re.search(rf"\(\s*{symbol}\s*\)", lowered, re.I):
+            return key
+
+    key = detect_element_key(text)
+    if key:
+        return key
+
+    serial_map = {
+        1: "NH4-N", 2: "NO3-N", 3: "P", 4: "HCO3", 5: "S",
+        6: "Cl", 7: "Ca", 8: "Mg", 9: "Na", 10: "K",
+        11: "Cu", 12: "Fe", 13: "Mn", 14: "Zn", 15: "B",
+        16: "Mo", 17: "Si", 19: "pH", 20: "EC",
+    }
+    return serial_map.get(row_no)
+
+
+def extract_water_report_value(line: str, key: str) -> Optional[float]:
+    numeric_tokens: list[tuple[float, int, bool]] = []
+    for match in re.finditer(r"<?\s*-?\d+(?:[.．]\s*\d+)?(?:[eE][+-]?\d+)?", line):
+        raw = re.sub(r"\s+", "", match.group()).replace("．", ".")
+        is_threshold = raw.startswith("<")
+        value = _to_float(raw.lstrip("<"))
+        if value is None:
+            continue
+        numeric_tokens.append((value, match.start(), is_threshold))
+
+    if not numeric_tokens:
+        return None
+
+    # 跳过最左侧序号；PDF/OCR 常把序号和检测值放在同一行。
+    row_no_match = re.match(r"^\s*(\d{1,2})\b", line)
+    if row_no_match:
+        row_no_end = row_no_match.end()
+        numeric_tokens = [item for item in numeric_tokens if item[1] >= row_no_end]
+
+    if not numeric_tokens:
+        return None
+
+    value = numeric_tokens[-1][0]
+    if key == "EC":
+        return value * 1000 if value < 20 else value
+    if key in {"Cu", "Fe", "Mn", "Zn", "B", "Mo", "Si"} and len(numeric_tokens) >= 2:
+        return value / 1000
+    return value
 
 
 def parse_formula_text(text: str) -> dict:
@@ -746,7 +908,8 @@ def delete_water_report(report_id: int):
 def list_titrations():
     conn = get_db()
     rows = conn.execute(
-        """SELECT t.id, t.measured_at, t.measured_ec, t.measured_ph, t.notes,
+        """SELECT t.id, t.measured_at, t.measured_ec, t.measured_ph,
+                  t.predicted_ec, t.predicted_ph, t.notes,
                   f.name AS formula_name, w.name AS water_name
            FROM titration_results t
            LEFT JOIN formulas f ON f.id = t.formula_id
@@ -763,12 +926,19 @@ def create_titration(titration: TitrationSave):
     cur = conn.execute(
         """INSERT INTO titration_results
                (formula_id, water_report_id, measured_at,
-                measured_ec, measured_ph, element_actuals, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                measured_ec, measured_ph, predicted_ec, predicted_ph,
+                element_actuals, water_snapshot, formula_snapshot,
+                total_mmol, acid_profile, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (titration.formula_id, titration.water_report_id,
          titration.measured_at or datetime.now().isoformat(),
          titration.measured_ec, titration.measured_ph,
+         titration.predicted_ec, titration.predicted_ph,
          json.dumps(titration.element_actuals, ensure_ascii=False),
+         json.dumps(titration.water_snapshot, ensure_ascii=False),
+         json.dumps(titration.formula_snapshot, ensure_ascii=False),
+         json.dumps(titration.total_mmol, ensure_ascii=False),
+         json.dumps(titration.acid_profile, ensure_ascii=False),
          titration.notes),
     )
     conn.commit()
@@ -777,158 +947,77 @@ def create_titration(titration: TitrationSave):
     return {"id": new_id}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 飞书多维表格同步
-# ══════════════════════════════════════════════════════════════════════════════
-
-class FeishuConfig(BaseModel):
-    app_id:     str
-    app_secret: str       # 传入 "••••" 表示不修改已存储的 secret
-    app_token:  str
-    table_id:   str
-
-
-def _get_setting(conn: sqlite3.Connection, key: str) -> Optional[str]:
-    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    return row[0] if row else None
-
-
-def _set_setting(conn: sqlite3.Connection, key: str, value: str):
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-
-
-# ── 配置接口 ──────────────────────────────────────────────────────────────────
-@app.get("/api/feishu/config")
-def get_feishu_config():
-    conn = get_db()
-    config = {
-        "app_id":     _get_setting(conn, "feishu_app_id")     or "",
-        "app_token":  _get_setting(conn, "feishu_app_token")  or "",
-        "table_id":   _get_setting(conn, "feishu_table_id")   or "",
-        "has_secret": bool(_get_setting(conn, "feishu_app_secret")),
-    }
-    conn.close()
-    return config
-
-
-@app.post("/api/feishu/config")
-def save_feishu_config(cfg: FeishuConfig):
-    conn = get_db()
-    _set_setting(conn, "feishu_app_id",    cfg.app_id.strip())
-    _set_setting(conn, "feishu_app_token", cfg.app_token.strip())
-    _set_setting(conn, "feishu_table_id",  cfg.table_id.strip())
-    # 只有明确传入新 secret（不是掩码）才更新
-    if cfg.app_secret and not cfg.app_secret.startswith("•"):
-        _set_setting(conn, "feishu_app_secret", cfg.app_secret.strip())
-    conn.commit()
-    conn.close()
-    return {"ok": True}
-
-
-# ── URL 解析接口 ──────────────────────────────────────────────────────────────
-@app.post("/api/feishu/parse-url")
-def parse_feishu_url(body: dict):
-    url = body.get("url", "")
-    app_token, table_id = parse_bitable_url(url)
-    if not app_token:
-        raise HTTPException(400, "无法从 URL 中解析 app_token，请确认是多维表格（Base）链接")
-    return {"app_token": app_token or "", "table_id": table_id or ""}
-
-
-# ── 测试连接 ──────────────────────────────────────────────────────────────────
-@app.post("/api/feishu/test")
-async def test_feishu_connection(cfg: FeishuConfig):
-    conn = get_db()
-    secret = cfg.app_secret if not cfg.app_secret.startswith("•") else _get_setting(conn, "feishu_app_secret")
-    conn.close()
-
-    if not secret:
-        raise HTTPException(400, "App Secret 未设置")
-    try:
-        token = await get_tenant_access_token(cfg.app_id.strip(), secret)
-        records = await list_all_records(token, cfg.app_token.strip(), cfg.table_id.strip())
-        return {"ok": True, "record_count": len(records), "message": f"连接成功，共 {len(records)} 条记录"}
-    except Exception as e:
-        raise HTTPException(400, str(e))
-
-
-# ── 同步接口 ──────────────────────────────────────────────────────────────────
-@app.post("/api/feishu/sync")
-async def sync_feishu():
-    conn = get_db()
-    app_id     = _get_setting(conn, "feishu_app_id")
-    app_secret = _get_setting(conn, "feishu_app_secret")
-    app_token  = _get_setting(conn, "feishu_app_token")
-    table_id   = _get_setting(conn, "feishu_table_id")
-
-    if not all([app_id, app_secret, app_token, table_id]):
-        conn.close()
-        raise HTTPException(400, "飞书配置不完整，请先完成配置")
-
-    try:
-        token   = await get_tenant_access_token(app_id, app_secret)
-        records = await list_all_records(token, app_token, table_id)
-        reports = records_to_water_reports(records)
-
-        added = 0
-        skipped = 0
-        for r in reports:
-            feishu_id = r["feishu_record_id"]
-            exists = conn.execute(
-                "SELECT id FROM water_reports WHERE feishu_record_id = ?", (feishu_id,)
-            ).fetchone()
-            if exists:
-                skipped += 1
-                continue
-
-            conn.execute(
-                """INSERT INTO water_reports
-                       (name, tested_at, feishu_record_id,
-                        no3_n, nh4_n, n, p, k, ca, mg, s, cl,
-                        fe, mn, zn, b, cu, mo, na, si, hco3, ec, ph)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (r["name"], r.get("tested_at"), feishu_id,
-                 r.get("NO3-N", 0), r.get("NH4-N", 0), r.get("N",  0),
-                 r.get("P",    0), r.get("K",    0), r.get("Ca", 0),
-                 r.get("Mg",   0), r.get("S",    0), r.get("Cl", 0),
-                 r.get("Fe",   0), r.get("Mn",   0), r.get("Zn", 0),
-                 r.get("B",    0), r.get("Cu",   0), r.get("Mo", 0),
-                 r.get("Na",   0), r.get("Si",   0), r.get("HCO3", 0),
-                 r.get("EC",   0), r.get("pH",   0)),
-            )
-            added += 1
-
-        conn.commit()
-        msg = f"拉取 {len(records)} 条记录：新增 {added} 条，跳过重复 {skipped} 条"
-        conn.execute(
-            "INSERT INTO sync_log (records_added, status, message) VALUES (?, 'ok', ?)",
-            (added, msg),
-        )
-        conn.commit()
-        conn.close()
-        return {"ok": True, "total": len(records), "added": added, "skipped": skipped, "message": msg}
-
-    except Exception as e:
-        try:
-            conn.execute(
-                "INSERT INTO sync_log (records_added, status, message) VALUES (0, 'error', ?)",
-                (str(e),),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        raise HTTPException(500, str(e))
-
-
-# ── 同步历史 ──────────────────────────────────────────────────────────────────
-@app.get("/api/feishu/sync-log")
-def get_sync_log():
+@app.get("/api/calibration/ph")
+def get_ph_calibration():
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM sync_log ORDER BY synced_at DESC LIMIT 20"
+        """SELECT predicted_ph, measured_ph
+           FROM titration_results
+           WHERE predicted_ph IS NOT NULL
+             AND measured_ph IS NOT NULL
+             AND predicted_ph > 0
+             AND measured_ph > 0
+             AND predicted_ph <= 14
+             AND measured_ph <= 14
+           ORDER BY measured_at DESC, created_at DESC
+           LIMIT 200"""
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+
+    points = [
+        {
+            "predicted_ph": float(row["predicted_ph"]),
+            "measured_ph": float(row["measured_ph"]),
+            "residual": float(row["measured_ph"]) - float(row["predicted_ph"]),
+        }
+        for row in rows
+    ]
+    if not points:
+        return {
+            "enabled": False,
+            "count": 0,
+            "slope": 0,
+            "intercept": 0,
+            "max_correction": 0,
+            "min_predicted_ph": None,
+            "max_predicted_ph": None,
+            "mae": None,
+            "strategy": "none",
+        }
+
+    xs = [p["predicted_ph"] for p in points]
+    ys = [p["residual"] for p in points]
+    count = len(points)
+    mean_x = sum(xs) / count
+    mean_y = sum(ys) / count
+    denom = sum((x - mean_x) ** 2 for x in xs)
+
+    if count >= 2 and denom > 1e-6:
+        slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom
+        intercept = mean_y - slope * mean_x
+        strategy = "linear_residual"
+    else:
+        slope = 0
+        intercept = mean_y
+        strategy = "mean_residual"
+
+    fitted_errors = [
+        abs(y - (intercept + slope * x))
+        for x, y in zip(xs, ys)
+    ]
+    max_correction = 0.25 if count < 10 else 0.35
+
+    return {
+        "enabled": True,
+        "count": count,
+        "slope": slope,
+        "intercept": intercept,
+        "max_correction": max_correction,
+        "min_predicted_ph": min(xs),
+        "max_predicted_ph": max(xs),
+        "mae": sum(fitted_errors) / count,
+        "strategy": strategy,
+    }
 
 
 # ── 启动 ─────────────────────────────────────────────────────────────────────

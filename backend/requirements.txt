@@ -1,6 +1,5 @@
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
-httpx>=0.25.0
 pypdf>=4.0.0
 openpyxl>=3.1.0
 # 图片 OCR（可选）— pillow/pytesseract 通过 pip 安装，但 Tesseract 二进制需要单独安装：

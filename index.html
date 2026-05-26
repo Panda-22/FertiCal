@@ -41,20 +41,28 @@
 
   /* ── Dark mode ──────────────────────────────────────────────────────────── */
   [data-theme="dark"] {
-    --bg:        #0e1017;
-    --bg2:       #161921;
-    --card:      #1a1d27;
-    --fg:        #e4e8f0;
-    --muted:     #7a8499;
-    --border:    #272b38;
-    --secondary: #20232e;
-    --primary:   #c8d0e4;
+    --bg:        #080b12;
+    --bg2:       #111827;
+    --card:      #18202d;
+    --fg:        #f3f6fb;
+    --muted:     #b8c2d4;
+    --border:    #3d485b;
+    --secondary: #263244;
+    --primary:   #e6edf8;
 
-    --a-soft:    #1f0c10;
-    --a-border:  #5c1e28;
+    --a:         #c93f54;
+    --a-soft:    #2a1018;
+    --a-border:  #a94a5a;
+    --a-fg:      #ff9eac;
 
-    --b-soft:    #0c1428;
-    --b-border:  #1c3268;
+    --b:         #3761b8;
+    --b-soft:    #101d3a;
+    --b-border:  #5f82d9;
+    --b-fg:      #abc7ff;
+
+    --good:  #55d981;
+    --warn:  #f4b84e;
+    --bad:   #ff7b7b;
 
     --shadow-sm: 0 1px 3px rgba(0,0,0,.25);
     --shadow:    0 1px 3px rgba(0,0,0,.25), 0 8px 24px -8px rgba(0,0,0,.45);
@@ -72,6 +80,13 @@
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     transition: background var(--transition), color var(--transition);
+  }
+  [data-theme="dark"] body {
+    -webkit-font-smoothing: auto;
+  }
+  [data-theme="dark"] ::selection {
+    background: #dbeafe;
+    color: #0b1020;
   }
 
   .shell { max-width: 1200px; margin: 0 auto; padding: 40px 24px 60px; }
@@ -94,7 +109,7 @@
     background-clip: text;
   }
   [data-theme="dark"] h1 {
-    background: linear-gradient(135deg, #e4e8f0 40%, #7a8499);
+    background: linear-gradient(135deg, #ffffff 42%, #c6d1e4);
     -webkit-background-clip: text; background-clip: text;
   }
   .hero-text { color: var(--muted); font-size: 14px; max-width: 640px; margin: 0; }
@@ -136,6 +151,12 @@
     flex-shrink: 0;
   }
   #themeToggle:hover { background: var(--secondary); }
+  [data-theme="dark"] #themeToggle,
+  [data-theme="dark"] .btn-ghost,
+  [data-theme="dark"] .file-picker span,
+  [data-theme="dark"] .mode-card {
+    border-color: #536176;
+  }
 
   /* ── Panel cards ────────────────────────────────────────────────────────── */
   .panel {
@@ -143,6 +164,19 @@
     border-radius: var(--radius); padding: 24px;
     box-shadow: var(--shadow); margin-bottom: 24px;
     transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
+  }
+  .module-panel.is-collapsed {
+    box-shadow: var(--shadow-sm);
+  }
+  .module-panel.is-collapsed > :not(.panel-head) {
+    display: none !important;
+  }
+  .module-panel.is-collapsed > .panel-head {
+    margin-bottom: 0;
+  }
+  .module-toggle {
+    min-width: 78px;
+    justify-content: center;
   }
   .panel-a { background: var(--a-soft); border: 2px solid var(--a-border); }
   .panel-b { background: var(--b-soft); border: 2px solid var(--b-border); }
@@ -179,6 +213,10 @@
                 box-shadow var(--transition), transform var(--transition);
   }
   button:active { transform: scale(.97); }
+  :focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--primary) 78%, transparent);
+    outline-offset: 3px;
+  }
 
   .btn-ghost {
     background: var(--card); border: 1px solid var(--border); color: var(--fg);
@@ -218,6 +256,14 @@
     display: grid; gap: 8px;
     grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
   }
+  .water-group-title {
+    grid-column: 1 / -1;
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .water-group-title:first-child { margin-top: 0; }
   .water-cell {
     display: flex; align-items: center; gap: 8px;
     background: var(--card); border: 1px solid var(--border);
@@ -228,7 +274,7 @@
     border-color: var(--primary); box-shadow: 0 0 0 2px rgba(45,55,72,.12);
   }
   [data-theme="dark"] .water-cell:focus-within {
-    box-shadow: 0 0 0 2px rgba(200,208,228,.15);
+    box-shadow: 0 0 0 3px rgba(230,237,248,.24);
   }
   .water-cell .el { width: 52px; font-size: 11px; font-weight: 600; flex-shrink: 0; }
   .water-cell input {
@@ -236,17 +282,28 @@
     text-align: right; font: inherit; font-variant-numeric: tabular-nums;
     font-size: 13px; min-width: 0; color: var(--fg);
   }
+  [data-theme="dark"] input,
+  [data-theme="dark"] textarea,
+  [data-theme="dark"] select {
+    caret-color: var(--primary);
+  }
+  [data-theme="dark"] select option {
+    background: var(--card);
+    color: var(--fg);
+  }
   .water-cell .unit { font-size: 10px; color: var(--muted); white-space: nowrap; }
 
   /* ── Stock config ───────────────────────────────────────────────────────── */
-  .stock-config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-  .stock-config label {
+  .stock-config { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .stock-config label,
+  .stock-total {
     background: var(--card); border: 1px solid var(--border);
     border-radius: var(--radius-sm); padding: 8px 12px; display: block;
     transition: border-color var(--transition);
   }
   .stock-config label:focus-within { border-color: var(--primary); }
-  .stock-config .lbl { font-size: 11px; color: var(--muted); display: block; }
+  .stock-config .lbl,
+  .stock-total .lbl { font-size: 11px; color: var(--muted); display: block; }
   .stock-config .inline { display: flex; align-items: baseline; gap: 4px; margin-top: 2px; }
   .stock-config input {
     border: none; background: transparent; outline: none; font: inherit;
@@ -254,6 +311,10 @@
     font-variant-numeric: tabular-nums; color: var(--fg);
   }
   .stock-config .unit { font-size: 11px; color: var(--muted); }
+  .stock-total .value {
+    margin-top: 2px; font-size: 18px; font-weight: 600;
+    font-variant-numeric: tabular-nums; color: var(--fg);
+  }
 
   /* ── Mix list ───────────────────────────────────────────────────────────── */
   .mix-list { display: flex; flex-direction: column; gap: 8px; }
@@ -304,29 +365,48 @@
   }
   .panel-a .compound-chip { background: rgba(155,28,43,.1);  color: var(--a-fg); }
   .panel-b .compound-chip { background: rgba(30,58,138,.1);  color: var(--b-fg); }
-  [data-theme="dark"] .compound-chip { background: rgba(255,255,255,.08); }
-  [data-theme="dark"] .panel-a .compound-chip { background: rgba(155,28,43,.2); }
-  [data-theme="dark"] .panel-b .compound-chip { background: rgba(30,58,138,.2); }
+  [data-theme="dark"] .compound-chip {
+    background: rgba(230,237,248,.12);
+    border: 1px solid rgba(230,237,248,.12);
+  }
+  [data-theme="dark"] .panel-a .compound-chip { background: rgba(201,63,84,.22); }
+  [data-theme="dark"] .panel-b .compound-chip { background: rgba(77,120,216,.24); }
 
   .empty {
     border: 1px dashed var(--border); border-radius: var(--radius-sm);
     background: rgba(255,255,255,.4);
     padding: 20px; text-align: center; color: var(--muted); font-size: 13px;
   }
-  [data-theme="dark"] .empty { background: rgba(255,255,255,.03); }
+  [data-theme="dark"] .empty { background: rgba(230,237,248,.06); }
 
   .summary-strip {
     margin-top: 14px; background: rgba(255,255,255,.55); border-radius: var(--radius-sm);
     padding: 10px 12px; border: 1px solid rgba(255,255,255,.7);
   }
   [data-theme="dark"] .summary-strip {
-    background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.06);
+    background: rgba(230,237,248,.07); border-color: rgba(230,237,248,.16);
   }
   .summary-strip .label {
     font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
     color: var(--muted); margin-bottom: 6px;
   }
   .summary-strip .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .stock-readouts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .stock-readout {
+    display: inline-flex; align-items: baseline; gap: 4px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--card); padding: 6px 9px;
+  }
+  .stock-readout .name {
+    color: var(--muted); font-size: 11px; font-weight: 600;
+  }
+  .stock-readout .value {
+    color: var(--fg); font-size: 16px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .stock-readout .unit {
+    color: var(--muted); font-size: 11px; font-weight: 500;
+  }
   .chip {
     display: inline-flex; align-items: baseline; gap: 4px;
     padding: 3px 8px; border-radius: 6px; font-size: 12px; font-weight: 500;
@@ -367,7 +447,7 @@
   }
   [data-theme="dark"] .dialog-field input:focus,
   [data-theme="dark"] .dialog-field textarea:focus {
-    box-shadow: 0 0 0 2px rgba(200,208,228,.12);
+    box-shadow: 0 0 0 3px rgba(230,237,248,.22);
   }
   .dialog-field textarea { resize: vertical; min-height: 64px; }
   .dialog-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
@@ -382,43 +462,6 @@
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   }
   .quick-actions select { min-width: 150px; }
-
-  .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(120px, 1fr));
-    gap: 10px;
-    margin: 12px 0 16px;
-  }
-  .kpi-card {
-    background: var(--secondary);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 10px 12px;
-    min-height: 72px;
-  }
-  .kpi-label {
-    color: var(--muted);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: .08em;
-    text-transform: uppercase;
-  }
-  .kpi-label.keep-case {
-    text-transform: none;
-  }
-  .kpi-value {
-    margin-top: 4px;
-    color: var(--fg);
-    font-size: 20px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-  }
-  .kpi-meta {
-    margin-top: 2px;
-    color: var(--muted);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-  }
 
   details.target-section {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -455,6 +498,20 @@
   tbody tr:hover { background: var(--secondary); }
   tbody tr:nth-child(even) { background: var(--bg2); }
   tbody tr:nth-child(even):hover { background: var(--secondary); }
+  [data-theme="dark"] .table-wrap {
+    border-color: #4a5669;
+  }
+  [data-theme="dark"] thead {
+    background: #2d3a4f;
+    color: #d9e2f0;
+  }
+  [data-theme="dark"] tbody tr:nth-child(even) {
+    background: #202a3a;
+  }
+  [data-theme="dark"] tbody tr:hover,
+  [data-theme="dark"] tbody tr:nth-child(even):hover {
+    background: #33445c;
+  }
 
   td.el { font-weight: 600; }
   td.num { font-variant-numeric: tabular-nums; }
@@ -477,6 +534,21 @@
     border: 1px solid var(--border); border-radius: 10px; padding: 16px;
     transition: border-color var(--transition), background var(--transition);
   }
+  [data-theme="dark"] .result-card,
+  [data-theme="dark"] details.target-section,
+  [data-theme="dark"] .suggestion-card,
+  [data-theme="dark"] .inventory-item,
+  [data-theme="dark"] .water-cell,
+  [data-theme="dark"] .stock-config label,
+  [data-theme="dark"] .stock-total,
+  [data-theme="dark"] .mix-item,
+  [data-theme="dark"] .grams-row,
+  [data-theme="dark"] .bucket-mol-card,
+  [data-theme="dark"] .precip-row,
+  [data-theme="dark"] .calibration-field input,
+  [data-theme="dark"] .calibration-field textarea {
+    border-color: #4a5669;
+  }
   .result-card.card-a { border-top: 3px solid var(--a); }
   .result-card.card-b { border-top: 3px solid var(--b); }
   .result-card.card-precip { border-top: 3px solid var(--warn); }
@@ -485,10 +557,20 @@
     display: flex; align-items: center; gap: 6px; color: var(--fg);
   }
 
-  .grams-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .grams-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .bucket-mol-card {
+    display: flex; flex-direction: column; gap: 8px;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px; background: var(--secondary);
+  }
+  .bucket-mol-card h4 {
+    margin: 0; font-size: 13px; font-weight: 700;
+  }
+  .bucket-mol-card.a h4 { color: var(--a-fg); }
+  .bucket-mol-card.b h4 { color: var(--b-fg); }
   .grams-row {
     display: flex; justify-content: space-between; align-items: center;
-    background: var(--secondary); border-radius: 6px; padding: 5px 10px; font-size: 13px;
+    background: var(--card); border-radius: 6px; padding: 5px 10px; font-size: 13px;
     border: 1px solid var(--border);
   }
   .grams-row .el-name { font-weight: 600; font-size: 12px; }
@@ -602,6 +684,51 @@
     font-size: 13px;
     padding: 8px 10px;
   }
+  .calibration-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    align-items: end;
+  }
+  .calibration-field {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+  }
+  .calibration-field span {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .calibration-field input,
+  .calibration-field textarea {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--card);
+    color: var(--fg);
+    font: inherit;
+    font-size: 13px;
+    padding: 9px 10px;
+    outline: none;
+  }
+  .calibration-field textarea {
+    min-height: 38px;
+    resize: vertical;
+  }
+  .calibration-readout {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 12px 0 0;
+  }
+  .calibration-readout span {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--secondary);
+    padding: 6px 9px;
+    color: var(--muted);
+    font-size: 12px;
+  }
   .inventory-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
@@ -632,9 +759,9 @@
   @media (max-width: 900px) {
     .bucket-grid      { grid-template-columns: 1fr; }
     .water-grid       { grid-template-columns: repeat(2, 1fr); }
+    .calibration-grid { grid-template-columns: repeat(2, 1fr); }
     .result-grid      { grid-template-columns: 1fr; }
     .suggestion-grid  { grid-template-columns: 1fr; }
-    .kpi-grid         { grid-template-columns: repeat(3, 1fr); }
     .grams-grid       { grid-template-columns: 1fr; }
     h1                { font-size: 26px; }
     .hero-right       { align-items: flex-start; }
@@ -644,8 +771,16 @@
     .panel { padding: 16px; }
     .hero  { margin-bottom: 20px; }
     .btn-ghost { padding: 7px 10px; font-size: 12px; }
-    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .calibration-grid { grid-template-columns: 1fr; }
     .suggestion-buckets { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: .01ms !important;
+    }
   }
 </style>
 </head>
@@ -682,7 +817,7 @@
   </header>
 
   <!-- ── Step 01: Water quality ─────────────────────────────────────────────── -->
-  <section id="waterSection" class="panel" style="display:none">
+  <section id="waterSection" class="panel module-panel is-collapsed" style="display:none">
     <div class="panel-head">
       <div class="head-row">
         <div class="badge">01</div>
@@ -694,22 +829,23 @@
       </div>
       <div class="water-actions">
         <label class="file-picker">
-          <input id="reportFile" type="file" accept=".xlsx,.xls,.csv" />
-          <span>⬆ 导入 Excel</span>
+          <input id="reportFile" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp" />
+          <span>⬆ 导入报告</span>
         </label>
         <button id="roWater" class="btn-ghost" type="button">RO水灌溉</button>
+        <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
       </div>
     </div>
-    <p id="reportStatus" class="muted">还未导入报告 · 支持 .xlsx / .xls / .csv</p>
+    <p id="reportStatus" class="muted">还未导入报告 · 支持 Excel / CSV / PDF / 图片</p>
     <div id="waterGrid" class="water-grid"></div>
   </section>
 
-  <section id="importPanel" class="panel" style="display:none">
+  <section id="importPanel" class="panel module-panel is-collapsed" style="display:none">
     <div class="panel-head">
       <div class="head-row">
-        <div class="badge">导</div>
+        <div class="badge">02</div>
         <div class="head-text">
-          <p class="kicker">Import</p>
+          <p class="kicker">Step 02</p>
           <h2>目标与实际配方导入</h2>
           <p>导入目标元素浓度与实际配方文件，自动填入目标值和 A/B 桶肥料用量</p>
         </div>
@@ -723,6 +859,7 @@
           <input id="formulaFile" type="file" accept=".xlsx,.xls,.csv,.txt,.pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff" />
           <span>导入配方文件</span>
         </label>
+        <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
       </div>
     </div>
     <p id="targetImportStatus" class="muted">目标文件支持 PDF / Excel / CSV / TXT / 图片 OCR</p>
@@ -731,7 +868,7 @@
 
   <!-- ── Steps 02 & 03: Buckets ─────────────────────────────────────────────── -->
   <div id="bucketGrid" class="bucket-grid" style="display:none">
-    <section class="panel panel-a">
+    <section class="panel panel-a module-panel is-collapsed">
       <div class="panel-head">
         <div class="head-row">
           <div class="badge">A</div>
@@ -741,7 +878,10 @@
             <p>钙、铁、硝态氮组</p>
           </div>
         </div>
-        <button id="addA" class="btn-a">+ 添加肥料</button>
+        <div class="water-actions">
+          <button id="addA" class="btn-a">+ 添加肥料</button>
+          <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
+        </div>
       </div>
       <div class="stock-config">
         <label>
@@ -758,15 +898,19 @@
             <input id="aDilution" type="number" min="1" step="1" value="100">
           </div>
         </label>
+        <div class="stock-total">
+          <span class="lbl">肥料总重量</span>
+          <div id="bucketATotalWeight" class="value">0 g</div>
+        </div>
       </div>
       <div id="bucketAList" class="mix-list"></div>
       <div id="summaryA" class="summary-strip" style="display:none">
-        <div class="label">稀释后贡献 (g 总量)</div>
+        <div class="label">母液桶状态</div>
         <div class="chips"></div>
       </div>
     </section>
 
-    <section class="panel panel-b">
+    <section class="panel panel-b module-panel is-collapsed">
       <div class="panel-head">
         <div class="head-row">
           <div class="badge">B</div>
@@ -776,7 +920,10 @@
             <p>磷、硫、镁、微量元素组</p>
           </div>
         </div>
-        <button id="addB" class="btn-b">+ 添加肥料</button>
+        <div class="water-actions">
+          <button id="addB" class="btn-b">+ 添加肥料</button>
+          <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
+        </div>
       </div>
       <div class="stock-config">
         <label>
@@ -793,17 +940,53 @@
             <input id="bDilution" type="number" min="1" step="1" value="100">
           </div>
         </label>
+        <div class="stock-total">
+          <span class="lbl">肥料总重量</span>
+          <div id="bucketBTotalWeight" class="value">0 g</div>
+        </div>
       </div>
       <div id="bucketBList" class="mix-list"></div>
       <div id="summaryB" class="summary-strip" style="display:none">
-        <div class="label">稀释后贡献 (g 总量)</div>
+        <div class="label">母液桶状态</div>
         <div class="chips"></div>
       </div>
     </section>
   </div>
 
+  <section id="formulaExportPanel" class="panel module-panel is-collapsed" style="display:none">
+    <div class="panel-head">
+      <div class="head-row">
+        <div class="badge">04</div>
+        <div class="head-text">
+          <p class="kicker">Step 04</p>
+          <h2>导出配方</h2>
+          <p>确认 A/B 桶微调后的用量，导出当前配方并记录与建议方案的差异</p>
+        </div>
+      </div>
+      <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
+    </div>
+    <div class="suggestion-export">
+      <label>
+        <span>AB肥配制量</span>
+        <select id="formulaExportVolume">
+          <option value="100">100 L</option>
+          <option value="1000">1000 L</option>
+        </select>
+      </label>
+      <label>
+        <span>导出格式</span>
+        <select id="formulaExportFormat">
+          <option value="xlsx">Excel</option>
+          <option value="pdf">PDF</option>
+        </select>
+      </label>
+      <button id="exportSelectedFormula" class="btn-a" type="button">导出配方</button>
+    </div>
+    <p id="formulaExportStatus" class="muted">导出后会在本机浏览器中保留一条微调记录，用于后续优化建议算法。</p>
+  </section>
+
   <!-- ── Mode 2 only: Target elements input ───────────────────────────────── -->
-  <section id="mode2TargetSection" class="panel" style="display:none">
+  <section id="mode2TargetSection" class="panel module-panel is-collapsed" style="display:none">
     <div class="panel-head">
       <div class="head-row">
         <div class="badge">02</div>
@@ -822,6 +1005,7 @@
           <input id="targetFileM2" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff" />
           <span>导入目标文件</span>
         </label>
+        <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
       </div>
     </div>
     <p id="mode2TargetStatus" class="muted">设定目标浓度后将自动生成 3 套配方建议 · 支持 PDF / Excel / 图片 OCR</p>
@@ -829,7 +1013,7 @@
   </section>
 
   <!-- ── Step 04: Results ───────────────────────────────────────────────────── -->
-  <section id="resultsSection" class="panel" style="display:none">
+  <section id="resultsSection" class="panel module-panel is-collapsed" style="display:none">
     <div class="panel-head">
       <div class="head-row">
         <div class="badge" id="resultsBadge">04</div>
@@ -853,6 +1037,7 @@
         <button id="startCalc" class="btn-ghost">▶ 计算</button>
         <button id="exportResults" class="btn-ghost">导出结果</button>
       </div>
+      <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
     </div>
 
     <details id="targetDetails" class="target-section">
@@ -871,7 +1056,6 @@
 
     <p id="calcStatus" class="muted"></p>
     <div id="reverseSuggestions" class="suggestion-panel"></div>
-    <div id="kpiGrid" class="kpi-grid"></div>
 
     <div id="tableWrap" class="table-wrap">
       <table>
@@ -893,7 +1077,7 @@
 
     <div id="resultGrid" class="result-grid">
       <div class="result-card card-a">
-        <h3><span style="color:var(--a)">A</span> / <span style="color:var(--b)">B</span> 桶元素总量 (g)</h3>
+        <h3><span style="color:var(--a)">A</span> / <span style="color:var(--b)">B</span> 桶母液元素含量 (mol/100L)</h3>
         <div id="elementTotalsGrid" class="grams-grid"></div>
       </div>
       <div class="result-card card-precip">
@@ -901,6 +1085,37 @@
         <ul id="precipList" class="precip-list"></ul>
       </div>
     </div>
+  </section>
+
+  <section id="calibrationSection" class="panel module-panel is-collapsed" style="display:none">
+    <div class="panel-head">
+      <div class="head-row">
+        <div class="badge">05</div>
+        <div class="head-text">
+          <p class="kicker">Step 05</p>
+          <h2>实测校准记录</h2>
+          <p>填入本次工作液实测 EC 与 pH，保存当前原水、配方和理论计算快照</p>
+        </div>
+      </div>
+      <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
+    </div>
+    <div class="calibration-grid">
+      <label class="calibration-field">
+        <span>实测 EC (uS/cm)</span>
+        <input id="measuredEc" type="number" min="0" step="1" placeholder="例如 1650">
+      </label>
+      <label class="calibration-field">
+        <span>实测 pH</span>
+        <input id="measuredPh" type="number" min="0" max="14" step="0.01" placeholder="例如 6.42">
+      </label>
+      <label class="calibration-field">
+        <span>备注</span>
+        <textarea id="titrationNotes" placeholder="酸种类、酸量、温度等"></textarea>
+      </label>
+      <button id="saveTitration" class="btn-a" type="button">保存校准数据</button>
+    </div>
+    <div id="calibrationReadout" class="calibration-readout"></div>
+    <p id="calibrationStatus" class="muted">保存后会写入本机 SQLite，用于后续 pH/EC 贡献系数校准。</p>
   </section>
 </div>
 

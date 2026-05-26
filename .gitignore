@@ -1,5 +1,7 @@
 node_modules/
 .npm-cache/
+.tools/
+outputs/
 
 *.xlsx
 *.xls

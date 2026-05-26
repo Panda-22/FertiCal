@@ -16,6 +16,7 @@ const ELEMENT_META = [
   { key: "Mo", label: "钼 Mo", unit: "mg/L" },
   { key: "Na", label: "钠 Na", unit: "mg/L" },
   { key: "Si", label: "硅 Si", unit: "mg/L" },
+  { key: "CO3", label: "碳酸根 CO3--", unit: "mg/L" },
   { key: "HCO3", label: "碳酸氢根 HCO3-", unit: "mg/L" },
   { key: "EC", label: "EC", unit: "uS/cm" },
   { key: "pH", label: "pH", unit: "" }
@@ -39,6 +40,7 @@ const MOLAR_MASS = {
   Mo: 95.95,
   Na: 22.989769,
   Si: 28.085,
+  CO3: 60.0089,
   HCO3: 61.0168
 };
 
@@ -66,18 +68,27 @@ const EC_COEFFICIENTS = {
   Cu: 108.0
 };
 const EC_ACTIVITY_FACTOR = 0.82;
-const LOW_CONTENT_KEYS = new Set(["S", "Cl"]);
-const LOW_CONTENT_BENCHMARK = {
-  S: 2,
-  Cl: 1
-};
-const LOW_CONTENT_WEIGHT = {
-  S: 0.45,
-  Cl: 0.8
+const TRACE_FERTILIZER_KEYS = new Set(["Fe", "Mn", "Zn", "B", "Cu", "Mo"]);
+const MAIN_ELEMENT_KEYS = new Set(["NO3-N", "NH4-N", "N", "P", "K", "Ca", "Mg", "S"]);
+const DISPLAY_ELEMENT_GROUPS = [
+  { title: "大中量元素", keys: MAIN_ELEMENT_KEYS },
+  { title: "微量元素", keys: TRACE_FERTILIZER_KEYS },
+  { title: "其他指标", keys: null }
+];
+const UNDERSHOOT_ALLOWED_KEYS = new Set(["S", "Cl", "Na"]);
+const NH4_SHARE_LIMITS = {
+  tomato: { warn: 0.10, bad: 0.15 },
+  default: { warn: 0.15, bad: 0.20 }
 };
 const DEFAULT_TARGET_PH = 6;
-const MIN_AUTO_ACID_STOCK_PH = 2.2;
+const PH_TARGET_SAFE_DELTA = 0.3;
+const PH_TARGET_WARN_DELTA = 0.5;
+const PH_TARGET_REJECT_DELTA = 0.8;
+const MIN_AUTO_ACID_STOCK_PH = 1.0;
 const WORKING_SOLUTION_CO2_RELEASE_FACTOR = 0.7;
+const TARGET_RESIDUAL_HCO3_MMOL = 0.75;
+const ACID_PREFEED_MIN_MMOL = 0.02;
+const NITRIC_ACID_REGULATORY_PENALTY_PER_KG = 0.35;
 
 function calculateEC(totalMmol) {
   let ec = 0;
@@ -99,28 +110,43 @@ function calculateEC(totalMmol) {
 
 function calculatePH(totalMmol, acidProfile = null) {
   try {
-    return calculatePHImpl(totalMmol, acidProfile);
+    const rawPH = calculatePHImpl(totalMmol, acidProfile);
+    return applyPHCalibration(rawPH);
   } catch (e) {
     console.error('FertiCal: calculatePH error', e);
     return 7.0;
   }
 }
 
+function applyPHCalibration(rawPH) {
+  const calibration = state?.phCalibration;
+  if (!calibration?.enabled || !Number.isFinite(rawPH)) return rawPH;
+
+  const minPH = Number(calibration.min_predicted_ph);
+  const maxPH = Number(calibration.max_predicted_ph);
+  if (Number.isFinite(minPH) && Number.isFinite(maxPH)) {
+    const margin = 0.5;
+    if (rawPH < minPH - margin || rawPH > maxPH + margin) return rawPH;
+  }
+
+  const correction = (Number(calibration.intercept) || 0) + (Number(calibration.slope) || 0) * rawPH;
+  const limit = Number(calibration.max_correction) || 0.25;
+  return clampPH(rawPH + clamp(correction, -limit, limit), 0.3, 9.5);
+}
+
 function calculatePHImpl(totalMmol, acidProfile = null) {
-  const hco3Mmol = Number(totalMmol.HCO3) || 0;
+  const initialAlkalinity = carbonateAlkalinityFromMmol(totalMmol);
   const waterPH = (typeof state.water?.pH === "number" && state.water.pH > 0)
     ? state.water.pH : 7.5;
 
-  if (hco3Mmol <= 0) {
+  if (initialAlkalinity <= 0) {
     const acid = effectiveAcidMmol(acidProfile);
     const phosphateBuffer = (acidProfile?.h2po4 ?? 0) + (acidProfile?.h3po4 ?? 0);
     if (phosphateBuffer > 0) return Math.max(2.5, Math.min(7.2, 6.2 - acid / phosphateBuffer));
     return Math.max(3.0, Math.min(8.5, waterPH - acid * 0.8));
   }
 
-  const waterHco3Frac = carbonateFractions(waterPH).hco3 || 1;
-  const initialDicMmol = hco3Mmol / Math.max(waterHco3Frac, 1e-9);
-  const initialAlkalinity = hco3Mmol;
+  const initialDicMmol = carbonateDicFromMmol(totalMmol, waterPH);
 
   function carbonateAlkalinity(pH) {
     const H = Math.pow(10, -pH);
@@ -179,6 +205,25 @@ function effectiveAcidMmol(acidProfile = null, pH = 5.8) {
   );
 }
 
+function carbonateAlkalinityFromMmol(totalMmol, pH = null) {
+  const hco3 = Number(totalMmol?.HCO3) || 0;
+  const co3 = Number(totalMmol?.CO3) || 0;
+  const waterTerm = Number.isFinite(pH)
+    ? (WATER_KW / Math.pow(10, -pH) - Math.pow(10, -pH)) * 1000
+    : 0;
+  return Math.max(0, hco3 + 2 * co3 + waterTerm);
+}
+
+function carbonateDicFromMmol(totalMmol, pH) {
+  const hco3 = Number(totalMmol?.HCO3) || 0;
+  const co3 = Number(totalMmol?.CO3) || 0;
+  const fractions = carbonateFractions(pH);
+  const knownSpecies = hco3 + co3;
+  const knownFraction = fractions.hco3 + fractions.co3;
+  if (knownSpecies > 0 && knownFraction > 1e-9) return knownSpecies / knownFraction;
+  return carbonateAlkalinityFromMmol(totalMmol, pH);
+}
+
 function phosphateAcidEquivalents(pH) {
   const phosphate = phosphateFractions(pH);
   return {
@@ -188,28 +233,26 @@ function phosphateAcidEquivalents(pH) {
 }
 
 function calculateStockPH(totalMmol, acidProfile = null) {
-  const hco3Mmol = Number(totalMmol.HCO3) || 0;
+  const initialAlkalinity = carbonateAlkalinityFromMmol(totalMmol);
   const strongAcid = acidProfile?.strong ?? 0;
   const h3po4 = acidProfile?.h3po4 ?? 0;
   const h2po4 = acidProfile?.h2po4 ?? 0;
   const waterPH = (typeof state.water?.pH === "number" && state.water.pH > 0)
     ? state.water.pH : 7.5;
-  const strongExcess = Math.max(0, strongAcid - hco3Mmol);
+  const strongExcess = Math.max(0, strongAcid - initialAlkalinity);
   if (strongExcess > 0.001) {
     const phosphoricAcid = Math.max(0, h3po4 + h2po4);
     return estimateStrongAcidStockPH(strongExcess, phosphoricAcid);
   }
 
-  const remainingAlkalinity = Math.max(0, hco3Mmol - strongAcid);
+  const remainingAlkalinity = Math.max(0, initialAlkalinity - strongAcid);
   const h3po4Excess = Math.max(0, h3po4 - remainingAlkalinity);
   if (h3po4Excess > 0.001) {
     return estimateStrongAcidStockPH(0, h3po4Excess);
   }
 
-  if (hco3Mmol > 0) {
-    const waterHco3Frac = carbonateFractions(waterPH).hco3 || 1;
-    const dicMmol = hco3Mmol / Math.max(waterHco3Frac, 1e-9);
-    const initialAlkalinity = hco3Mmol;
+  if (initialAlkalinity > 0) {
+    const dicMmol = carbonateDicFromMmol(totalMmol, waterPH);
 
     const carbonateAlkalinity = (pH) => {
       const H = Math.pow(10, -pH);
@@ -229,7 +272,7 @@ function calculateStockPH(totalMmol, acidProfile = null) {
     return clampPH((PHOSPHORIC_PKA1 + PHOSPHORIC_PKA2) / 2, 3.5, 5.8);
   }
 
-  return calculatePH(totalMmol, acidProfile);
+  return calculatePHImpl(totalMmol, acidProfile);
 }
 
 function solvePHByBisection(balanceFn, lo, hi, fallbackPH) {
@@ -556,6 +599,7 @@ const DETECTION_RULES = [
   { key: "Na", matchers: [/\bna\b/i, /钠/] },
   { key: "Si", matchers: [/\bsi\b/i, /硅/] },
   { key: "HCO3", matchers: [/hco3/i, /碳酸氢根/, /重碳酸根/] },
+  { key: "CO3", matchers: [/(^|[^h])co3/i, /碳酸根/] },
   { key: "EC", matchers: [/\bec\b/i, /电导率/] },
   { key: "pH", matchers: [/\bph\b/i] }
 ];
@@ -584,6 +628,7 @@ const TARGET_PRESETS = [
   {
     id: "tomato-standard",
     name: "番茄标准",
+    cropType: "tomato",
     values: {
       N: 12.0, P: 1.4, K: 7.2, Ca: 4.5, Mg: 1.7, S: 2.4,
       Fe: 0.02, Mn: 0.009, Zn: 0.004, B: 0.046, Cu: 0.001, Mo: 0.0005,
@@ -611,22 +656,28 @@ const state = {
   inventory: Object.fromEntries(FERTILIZER_CATALOG.map((item) => [item.id, true])),
   reverseSuggestions: [],
   selectedReverseIndex: null,
+  cropType: null,
   isRoWater: false,
+  lastWaterSource: "",
+  lastFormulaSource: "",
+  phCalibration: null,
   bucketA: [],
   bucketB: []
 };
+let latestCalculation = null;
 
 const waterGrid = document.querySelector("#waterGrid");
 const bucketAList = document.querySelector("#bucketAList");
 const bucketBList = document.querySelector("#bucketBList");
 const summaryA = document.querySelector("#summaryA");
 const summaryB = document.querySelector("#summaryB");
+const bucketATotalWeight = document.querySelector("#bucketATotalWeight");
+const bucketBTotalWeight = document.querySelector("#bucketBTotalWeight");
 const elementTotalsGrid = document.querySelector("#elementTotalsGrid");
 const targetGrid = document.querySelector("#targetGrid");
 const inventoryGrid = document.querySelector("#inventoryGrid");
 const selectAllInventoryBtn = document.querySelector("#selectAllInventory");
 const clearAllInventoryBtn = document.querySelector("#clearAllInventory");
-const kpiGrid = document.querySelector("#kpiGrid");
 const irrigationBody = document.querySelector("#irrigationBody");
 const precipList = document.querySelector("#precipList");
 const reverseSuggestionsEl = document.querySelector("#reverseSuggestions");
@@ -637,6 +688,12 @@ const targetFile = document.querySelector("#targetFile");
 const formulaFile = document.querySelector("#formulaFile");
 const targetImportStatus = document.querySelector("#targetImportStatus");
 const formulaImportStatus = document.querySelector("#formulaImportStatus");
+const measuredEcInput = document.querySelector("#measuredEc");
+const measuredPhInput = document.querySelector("#measuredPh");
+const titrationNotesInput = document.querySelector("#titrationNotes");
+const saveTitrationBtn = document.querySelector("#saveTitration");
+const calibrationStatus = document.querySelector("#calibrationStatus");
+const calibrationReadout = document.querySelector("#calibrationReadout");
 
 init();
 
@@ -648,8 +705,10 @@ function init() {
   renderBucket("A");
   renderBucket("B");
   bindStaticEvents();
+  bindCollapsibleModules();
   bindModeEvents();
   setMode(0);
+  setTimeout(loadPHCalibration, 0);
 }
 
 function bindStaticEvents() {
@@ -671,11 +730,11 @@ function bindStaticEvents() {
   ["aTankVolume", "aDilution", "bTankVolume", "bDilution"].forEach((id) => {
     document.querySelector(`#${id}`).addEventListener("input", recalculate);
   });
-
   reportFile.addEventListener("change", handleReportUpload);
   roWaterBtn?.addEventListener("click", applyRoWater);
   targetFile?.addEventListener("change", handleTargetUpload);
   formulaFile?.addEventListener("change", handleFormulaUpload);
+  saveTitrationBtn?.addEventListener("click", saveCurrentTitration);
 
   // 同步 DOM 初始值（浏览器可能记住了上次的选择）
   CALC_MODE = document.querySelector("#calcMode")?.value ?? "forward";
@@ -704,6 +763,7 @@ function bindStaticEvents() {
   });
 
   document.querySelector("#exportResults")?.addEventListener("click", exportResults);
+  document.querySelector("#exportSelectedFormula")?.addEventListener("click", exportSelectedFormula);
 }
 
 function buildRow(bucket) {
@@ -727,14 +787,14 @@ function renderWaterTable() {
 
   roWaterBtn?.classList.toggle("is-active", state.isRoWater);
 
-  waterGrid.innerHTML = visibleItems.map((item) => `
+  waterGrid.innerHTML = renderGroupedElementCells(visibleItems, (item) => `
     <label class="water-cell">
       <span class="el">${item.key}</span>
-      <input data-water-key="${item.key}" type="number" step="0.001"
+      <input data-water-key="${item.key}" type="number" step="0.1"
         value="${state.isRoWater ? "0" : toInputValue(state.water[item.key])}" />
       <span class="unit">${item.unit || ""}</span>
     </label>
-  `).join("");
+  `);
 
   waterGrid.querySelectorAll("[data-water-key]").forEach((input) => {
     input.addEventListener("input", (event) => {
@@ -787,7 +847,7 @@ function renderBucket(bucket) {
         <div class="mix-main">
           <select data-role="fertilizer">${options}</select>
           <div class="grams">
-            <input data-role="amount" type="number" min="0" step="0.001" value="${toInputValue(row.amount)}" />
+            <input data-role="amount" type="number" min="0" step="0.1" value="${toInputValue(row.amount)}" />
             <select data-role="unit" class="unit-sel">
               <option value="g">g</option>
               <option value="kg">kg</option>
@@ -836,23 +896,24 @@ function renderBucket(bucket) {
 function renderTargetTable() {
   const grids = [targetGrid, document.getElementById("mode2TargetGrid")].filter(Boolean);
   if (!grids.length) return;
-  const html = ELEMENT_META.map((item) => `
+  const html = renderGroupedElementCells(ELEMENT_META, (item) => `
     <label class="water-cell">
       <span class="el">${item.key}</span>
-      <input data-target-key="${item.key}" type="number" step="0.001"
-        value="${toInputValue(state.targets[item.key])}" />
-      <span class="unit">${getDisplayUnit(item.key)}</span>
+      <input data-target-key="${item.key}" type="number" step="0.1"
+        value="${toTargetInputValue(item.key, state.targets[item.key])}" />
+      <span class="unit">${getTargetInputUnit(item.key)}</span>
     </label>
-  `).join("");
+  `);
   grids.forEach((grid) => {
     grid.innerHTML = html;
     grid.querySelectorAll("[data-target-key]").forEach((input) => {
       input.addEventListener("input", (event) => {
         const key = event.target.dataset.targetKey;
         clearReverseSelection();
-        state.targets[key] = toNullableNumber(event.target.value);
+        state.targets[key] = fromTargetInputValue(key, event.target.value);
+        syncTargetTotalN(key);
         document.querySelectorAll(`[data-target-key="${key}"]`).forEach((el) => {
-          if (el !== event.target) el.value = toInputValue(state.targets[key]);
+          if (el !== event.target) el.value = toTargetInputValue(key, state.targets[key]);
         });
         recalculate();
       });
@@ -906,6 +967,7 @@ function applyTargetPreset(presetId) {
   if (!preset) return;
   clearReverseSelection();
   clearTargets();
+  state.cropType = preset.cropType || null;
   Object.entries(preset.values).forEach(([key, value]) => {
     state.targets[key] = value;
   });
@@ -915,6 +977,7 @@ function applyTargetPreset(presetId) {
 
 function clearTargets() {
   Object.keys(state.targets).forEach((key) => { state.targets[key] = null; });
+  state.cropType = null;
 }
 
 function applyDefaultTargetPH() {
@@ -945,13 +1008,25 @@ function renderCurrentCalculation() {
   try {
     const bucketAResult = calculateBucket(state.bucketA, getNumericField("aTankVolume"), getNumericField("aDilution"));
     const bucketBResult = calculateBucket(state.bucketB, getNumericField("bTankVolume"), getNumericField("bDilution"));
+    const totalMmol = buildTotalMmol(bucketAResult, bucketBResult);
+    const acidProfile = buildTotalAcidProfile(bucketAResult, bucketBResult);
+    latestCalculation = {
+      bucketAResult,
+      bucketBResult,
+      totalMmol,
+      acidProfile,
+      predictedEc: calculateEC(totalMmol),
+      predictedPh: calculatePH(totalMmol, acidProfile)
+    };
 
     renderSummary(summaryA, bucketAResult, "A");
     renderSummary(summaryB, bucketBResult, "B");
+    renderBucketTotalWeight(bucketATotalWeight, bucketAResult);
+    renderBucketTotalWeight(bucketBTotalWeight, bucketBResult);
     renderElementTotals(bucketAResult, bucketBResult);
     renderIrrigation(bucketAResult, bucketBResult);
-    renderKpiCards(bucketAResult, bucketBResult);
     renderPrecipitation(bucketAResult, bucketBResult);
+    renderCalibrationReadout();
 
     if (statusEl && Date.now() > _statusHoldUntil) {
       const hasData = Object.values(bucketAResult.totals).some(v => v > 0) || Object.values(bucketBResult.totals).some(v => v > 0);
@@ -966,10 +1041,12 @@ function renderCurrentCalculation() {
 function calculateBucket(rows, tankVolume, dilutionFactor) {
   const totals = emptyElementMap();
   const acidTotals = emptyAcidProfile();
+  let totalFertilizerGrams = 0;
 
   rows.forEach((row) => {
     const fertilizer = getFertilizer(row.fertilizerId);
     const amountInGrams = row.unit === "kg" ? row.amount * 1000 : row.amount;
+    totalFertilizerGrams += amountInGrams;
     fertilizer.compounds.forEach((compound) => {
       const mass = amountInGrams * (compound.percent / 100);
       totals[compound.element] += mass;
@@ -1009,21 +1086,30 @@ function calculateBucket(rows, tankVolume, dilutionFactor) {
     acidIrrigation[key] = acidPerLiter[key] / dilutionFactor;
   });
 
-  return { totals, perLiter, irrigation, perLiterMmol, irrigationMmol, acidTotals, acidPerLiter, acidIrrigation };
+  return { totals, perLiter, irrigation, perLiterMmol, irrigationMmol, acidTotals, acidPerLiter, acidIrrigation, totalFertilizerGrams };
 }
 
 function renderSummary(target, bucketResult, bucketName) {
   const chipsEl = target.querySelector(".chips");
-  const leadKeys = ["N", "P", "K", "Ca", "Mg", "S", "Fe"];
-  const html = leadKeys
-    .map((key) => {
-      const amount = bucketResult.totals[key];
-      if (!amount) return "";
-      return `<span class="chip">${key} <span class="val">${formatNumber(amount)} g</span></span>`;
-    })
-    .join("");
+  const hasFertilizer = (bucketResult.totalFertilizerGrams ?? 0) > 0;
+  const stockMmol = buildStockMmol(bucketResult);
+  const stockEcMs = calculateEC(stockMmol) / 1000;
+  const stockPh = calculateStockPH(stockMmol, bucketResult.acidPerLiter);
+  const html = `
+    <div class="stock-readouts">
+      <div class="stock-readout">
+        <span class="name">EC</span>
+        <span class="value">${formatNumber(stockEcMs)}</span>
+        <span class="unit">mS/cm</span>
+      </div>
+      <div class="stock-readout">
+        <span class="name">pH</span>
+        <span class="value">${stockPh.toFixed(2)}</span>
+      </div>
+    </div>
+  `;
 
-  if (html) {
+  if (hasFertilizer) {
     target.style.display = "";
     if (chipsEl) chipsEl.innerHTML = html;
   } else {
@@ -1031,26 +1117,48 @@ function renderSummary(target, bucketResult, bucketName) {
   }
 }
 
+function renderBucketTotalWeight(target, bucketResult) {
+  if (!target) return;
+  target.textContent = formatWeight(bucketResult.totalFertilizerGrams ?? 0);
+}
+
+function formatWeight(grams) {
+  if (!Number.isFinite(grams) || grams <= 0) return "0 g";
+  if (grams >= 1000) return `${formatNumber(grams / 1000)} kg`;
+  return `${formatNumber(grams)} g`;
+}
+
 function renderElementTotals(bucketAResult, bucketBResult) {
   if (!elementTotalsGrid) return;
-  const html = ELEMENT_META
-    .filter((item) => !["EC", "pH"].includes(item.key))
-    .map((item) => {
-      const aValue = bucketAResult.totals[item.key] ?? 0;
-      const bValue = bucketBResult.totals[item.key] ?? 0;
-      if (!aValue && !bValue && !["N", "P", "K", "Ca", "Mg", "S"].includes(item.key)) return "";
-      return `
+  const keys = ["N", "P", "K", "Ca", "Mg"];
+  const buckets = [
+    { name: "A 桶", cls: "a", result: bucketAResult },
+    { name: "B 桶", cls: "b", result: bucketBResult }
+  ];
+  const hasConfiguredFertilizer = buckets.some((bucket) =>
+    keys.some((key) => (bucket.result.perLiterMmol[key] ?? 0) > 0)
+  );
+
+  if (!hasConfiguredFertilizer) {
+    elementTotalsGrid.innerHTML = `<div style="color:var(--muted);font-size:13px;grid-column:1/-1">尚未配置肥料</div>`;
+    return;
+  }
+
+  elementTotalsGrid.innerHTML = buckets.map((bucket) => `
+    <div class="bucket-mol-card ${bucket.cls}">
+      <h4>${bucket.name}</h4>
+      ${keys.map((key) => `
         <div class="grams-row">
-          <span><b>${item.key}</b></span>
-          <span class="vals">
-            <span class="a">A ${formatNumber(aValue)}</span>
-            <span class="b">B ${formatNumber(bValue)}</span>
-          </span>
+          <span><b>${key}</b></span>
+          <span class="vals">${formatNumber(molPer100LStock(bucket.result, key))} mol</span>
         </div>
-      `;
-    })
-    .join("");
-  elementTotalsGrid.innerHTML = html || `<div style="color:var(--muted);font-size:13px;grid-column:1/-1">尚未配置肥料</div>`;
+      `).join("")}
+    </div>
+  `).join("");
+}
+
+function molPer100LStock(bucketResult, key) {
+  return (bucketResult.perLiterMmol[key] ?? 0) * 0.1;
 }
 
 function buildTotalMmol(bucketAResult, bucketBResult) {
@@ -1076,37 +1184,6 @@ function buildWaterMmol() {
     waterMmol[item.key] = toMmolPerLiter(item.key, state.water[item.key] ?? 0) ?? 0;
   });
   return waterMmol;
-}
-
-function renderKpiCards(bucketAResult, bucketBResult) {
-  if (!kpiGrid) return;
-  const totalMmol = buildTotalMmol(bucketAResult, bucketBResult);
-  const acidProfile = buildTotalAcidProfile(bucketAResult, bucketBResult);
-  const ecValue = calculateEC(totalMmol);
-  const phValue = calculatePH(totalMmol, acidProfile);
-  const cards = [
-    { key: "EC", label: "EC", value: ecValue, unit: "uS/cm" },
-    { key: "pH", label: "pH", value: phValue, unit: "" },
-    { key: "N", label: "总氮", value: totalMmol.N ?? 0, unit: "mmol/L" },
-    { key: "K", label: "钾", value: totalMmol.K ?? 0, unit: "mmol/L" },
-    { key: "Ca", label: "钙", value: totalMmol.Ca ?? 0, unit: "mmol/L" },
-    { key: "Mg", label: "镁", value: totalMmol.Mg ?? 0, unit: "mmol/L" }
-  ];
-
-  kpiGrid.innerHTML = cards.map((card) => {
-    const targetValue = state.targets[card.key];
-    const hasTarget = typeof targetValue === "number" && Number.isFinite(targetValue);
-    const ratio = hasTarget && targetValue !== 0 ? (card.value - targetValue) / targetValue : null;
-    const cls = deviationClass(ratio, card.key);
-    const targetText = hasTarget ? `目标 ${formatNumber(targetValue)}${card.unit ? " " + card.unit : ""}` : "未设目标";
-    return `
-      <div class="kpi-card">
-        <div class="kpi-label ${card.key === "pH" ? "keep-case" : ""}">${card.label}</div>
-        <div class="kpi-value ${cls}">${card.key === "pH" ? card.value.toFixed(2) : formatNumber(card.value)}</div>
-        <div class="kpi-meta">${targetText}${ratio === null ? "" : ` · ${formatDeviation(ratio)}`}</div>
-      </div>
-    `;
-  }).join("");
 }
 
 function formatAcidContribution(profile, pH) {
@@ -1175,7 +1252,7 @@ function renderIrrigation(bucketAResult, bucketBResult) {
       const aValue = isConverted ? (bucketAResult.irrigationMmol[item.key] ?? 0) : (bucketAResult.irrigation[item.key] ?? 0);
       const bValue = isConverted ? (bucketBResult.irrigationMmol[item.key] ?? 0) : (bucketBResult.irrigation[item.key] ?? 0);
       const total = waterValue + aValue + bValue;
-      const unit = getDisplayUnit(item.key);
+      const unit = getConcentrationDisplayUnit(item.key);
       const targetValue = state.targets[item.key];
       const hasTarget = typeof targetValue === "number" && Number.isFinite(targetValue);
       const deviationRatio = hasTarget && targetValue !== 0 ? (total - targetValue) / targetValue : null;
@@ -1185,11 +1262,11 @@ function renderIrrigation(bucketAResult, bucketBResult) {
         <tr>
           <td>${item.label}</td>
           <td>${unit}</td>
-          <td>${formatNumber(waterValue)}</td>
-          <td>${formatNumber(aValue)}</td>
-          <td>${formatNumber(bValue)}</td>
-          <td class="${devCls}">${formatNumber(total)}</td>
-          <td>${hasTarget ? formatNumber(targetValue) : "-"}</td>
+          <td>${formatNumber(toConcentrationDisplayValue(item.key, waterValue))}</td>
+          <td>${formatNumber(toConcentrationDisplayValue(item.key, aValue))}</td>
+          <td>${formatNumber(toConcentrationDisplayValue(item.key, bValue))}</td>
+          <td class="${devCls}">${formatNumber(toConcentrationDisplayValue(item.key, total))}</td>
+          <td>${hasTarget ? formatNumber(toConcentrationDisplayValue(item.key, targetValue)) : "-"}</td>
           <td class="${devCls}">${formatDeviation(deviationRatio)}</td>
         </tr>
       `;
@@ -1290,19 +1367,47 @@ async function handleReportUpload(event) {
 
   try {
     const buffer = await readFileAsArrayBuffer(file);
-    const workbook = XLSX.read(buffer, { type: "array" });
-    const parsed = parseWorkbook(workbook);
+    const parsed = await parseWaterReportFile(file, buffer);
+    Object.keys(state.water).forEach((key) => { state.water[key] = 0; });
     Object.assign(state.water, parsed.values);
     state.isRoWater = false;
+    state.lastWaterSource = parsed.sheetName || file.name;
     clearReverseSelection();
     syncWaterTotalN();
     renderWaterTable();
     recalculate();
-    reportStatus.textContent = `已导入 ${file.name}，识别到 ${parsed.hitCount} 个指标，来源工作表：${parsed.sheetName}`;
+    reportStatus.textContent = `已导入 ${file.name}，识别到 ${parsed.hitCount} 个指标，来源：${parsed.sheetName}`;
   } catch (error) {
     console.error(error);
-    reportStatus.textContent = `文件读取失败：${error?.message || "请确认 Excel 文件可正常打开"}`;
+    const message = error?.message === "Not Found"
+      ? "后端接口不存在，请停止旧后端后重新运行 backend/start.sh"
+      : (error?.message || "请确认文件可正常打开；PDF/图片需启动本地后端并安装 OCR 依赖");
+    reportStatus.textContent = `水质报告解析失败：${message}`;
+  } finally {
+    event.target.value = "";
   }
+}
+
+async function parseWaterReportFile(file, buffer) {
+  if (isSpreadsheetFile(file.name)) {
+    const workbook = XLSX.read(buffer, { type: "array" });
+    return parseWorkbook(workbook);
+  }
+
+  const parsed = await apiFetch("/api/import/water", {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Filename": encodeURIComponent(file.name)
+    },
+    body: buffer
+  });
+
+  return {
+    values: parsed.values || {},
+    hitCount: Object.keys(parsed.values || {}).length,
+    sheetName: parsed.source || file.name
+  };
 }
 
 async function handleTargetUpload(event) {
@@ -1330,6 +1435,7 @@ async function handleTargetUpload(event) {
         state.targets[key] = Number(value);
       }
     });
+    syncTargetTotalN();
     applyDefaultTargetPH();
     ["#targetPreset", "#targetPreset2"].forEach((sel) => {
       const el = document.querySelector(sel);
@@ -1365,6 +1471,7 @@ async function handleFormulaUpload(event) {
 
     state.bucketA = parsed.bucketA;
     state.bucketB = parsed.bucketB;
+    state.lastFormulaSource = parsed.sheetName || file.name;
     clearReverseSelection();
 
     if (parsed.aVolume) document.querySelector("#aTankVolume").value = parsed.aVolume;
@@ -1640,6 +1747,20 @@ function syncWaterTotalN() {
   }
 }
 
+function syncTargetTotalN(changedKey = "") {
+  if (changedKey && !["NO3-N", "NH4-N", "N"].includes(changedKey)) return;
+  if (changedKey === "N") return;
+
+  const no3 = typeof state.targets["NO3-N"] === "number" ? state.targets["NO3-N"] : 0;
+  const nh4 = typeof state.targets["NH4-N"] === "number" ? state.targets["NH4-N"] : 0;
+  if (no3 > 0 || nh4 > 0) {
+    state.targets.N = no3 + nh4;
+    document.querySelectorAll(`[data-target-key="N"]`).forEach((el) => {
+      el.value = toTargetInputValue("N", state.targets.N);
+    });
+  }
+}
+
 function mergeElementMaps(...maps) {
   const merged = emptyElementMap();
   maps.forEach((map) => {
@@ -1669,8 +1790,49 @@ function emptyAcidProfile() {
   return { strong: 0, h3po4: 0, h2po4: 0 };
 }
 
+function renderGroupedElementCells(items, renderCell) {
+  const assignedKeys = new Set();
+  const sections = DISPLAY_ELEMENT_GROUPS.map((group) => {
+    const groupItems = items.filter((item) => {
+      if (group.keys) return group.keys.has(item.key);
+      return !assignedKeys.has(item.key);
+    });
+    groupItems.forEach((item) => assignedKeys.add(item.key));
+    return { title: group.title, items: groupItems };
+  }).filter((group) => group.items.length);
+
+  return sections.map((group) => `
+    <div class="water-group-title">${group.title}</div>
+    ${group.items.map(renderCell).join("")}
+  `).join("");
+}
+
 function getDisplayUnit(key) {
   return MOLAR_MASS[key] ? "mmol/L" : (ELEMENT_META.find((item) => item.key === key)?.unit ?? "");
+}
+
+function getConcentrationDisplayUnit(key) {
+  return TRACE_FERTILIZER_KEYS.has(key) ? "µmol/L" : getDisplayUnit(key);
+}
+
+function toConcentrationDisplayValue(key, value) {
+  return TRACE_FERTILIZER_KEYS.has(key) ? Number(value || 0) * 1000 : Number(value || 0);
+}
+
+function getTargetInputUnit(key) {
+  return getConcentrationDisplayUnit(key);
+}
+
+function toTargetInputValue(key, value) {
+  if (value == null || value === 0) return "";
+  const displayValue = TRACE_FERTILIZER_KEYS.has(key) ? Number(value) * 1000 : Number(value);
+  return formatInputNumber(displayValue);
+}
+
+function fromTargetInputValue(key, value) {
+  const numeric = toNullableNumber(value);
+  if (numeric == null) return null;
+  return TRACE_FERTILIZER_KEYS.has(key) ? numeric / 1000 : numeric;
 }
 
 function toMmolPerLiter(key, mgPerLiter) {
@@ -1707,17 +1869,19 @@ function toNullableNumber(value) {
 }
 
 function toInputValue(value) {
-  return value == null || value === 0 ? "" : value;
+  return value == null || value === 0 ? "" : formatInputNumber(value);
+}
+
+function formatInputNumber(value, maxDecimals = 3) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "";
+  return numeric.toFixed(maxDecimals).replace(/\.?0+$/, "");
 }
 
 function deviationClass(ratio, key = "") {
   if (ratio === null) return "";
-  const abs = Math.abs(ratio);
-  const badThreshold = ["S", "Cl"].includes(key) ? 0.50 : 0.30;
-  const goodThreshold = ["S", "Cl"].includes(key) ? 0.30 : 0.15;
-  if (abs <= goodThreshold) return "dev-good";
-  if (abs <= badThreshold) return "dev-warn";
-  return "dev-bad";
+  if (key === "EC") return "";
+  return reverseDeviationBand({ key, ratio });
 }
 
 function formatDeviation(ratio) {
@@ -1746,6 +1910,147 @@ function formatPercent(value) {
 function formatScientific(value) {
   if (!value) return "0";
   return Number(value).toExponential(3);
+}
+
+function renderCalibrationReadout() {
+  if (!calibrationReadout) return;
+  if (!latestCalculation) {
+    calibrationReadout.innerHTML = "";
+    return;
+  }
+  calibrationReadout.innerHTML = `
+    <span>理论 EC ${formatNumber(latestCalculation.predictedEc)} uS/cm</span>
+    <span>理论 pH ${latestCalculation.predictedPh.toFixed(2)}</span>
+    <span>原水 HCO3 ${formatNumber(state.water.HCO3)} mg/L</span>
+    ${state.phCalibration?.enabled ? `<span>pH校准 ${state.phCalibration.count} 组</span>` : ""}
+  `;
+}
+
+async function loadPHCalibration() {
+  try {
+    const calibration = await apiFetch("/api/calibration/ph");
+    state.phCalibration = calibration?.enabled ? calibration : null;
+    renderCurrentCalculation();
+  } catch (error) {
+    state.phCalibration = null;
+    console.warn("FertiCal: pH calibration unavailable", error);
+  }
+}
+
+async function saveCurrentTitration() {
+  if (!saveTitrationBtn || !calibrationStatus) return;
+  if (!latestCalculation) renderCurrentCalculation();
+
+  const measuredEc = toNullableNumber(measuredEcInput?.value ?? "");
+  const measuredPh = toNullableNumber(measuredPhInput?.value ?? "");
+  if (measuredEc == null || measuredPh == null) {
+    calibrationStatus.textContent = "请先填写本次实测 EC 和 pH。";
+    return;
+  }
+  if (measuredPh <= 0 || measuredPh > 14) {
+    calibrationStatus.textContent = "实测 pH 需要在 0-14 之间。";
+    return;
+  }
+
+  saveTitrationBtn.disabled = true;
+  calibrationStatus.textContent = "正在保存本次校准数据...";
+
+  try {
+    const waterPayload = buildWaterReportPayload();
+    const formulaPayload = buildFormulaPayload();
+    const [waterRecord, formulaRecord] = await Promise.all([
+      apiFetch("/api/water-reports", { method: "POST", body: JSON.stringify(waterPayload) }),
+      apiFetch("/api/formulas", { method: "POST", body: JSON.stringify(formulaPayload) })
+    ]);
+
+    const payload = {
+      formula_id: formulaRecord.id,
+      water_report_id: waterRecord.id,
+      measured_at: new Date().toISOString(),
+      measured_ec: measuredEc,
+      measured_ph: measuredPh,
+      predicted_ec: latestCalculation.predictedEc,
+      predicted_ph: latestCalculation.predictedPh,
+      element_actuals: {},
+      water_snapshot: cleanNumericMap(state.water),
+      formula_snapshot: formulaPayload,
+      total_mmol: cleanNumericMap(latestCalculation.totalMmol),
+      acid_profile: cleanNumericMap(latestCalculation.acidProfile),
+      notes: titrationNotesInput?.value?.trim() || null
+    };
+    await apiFetch("/api/titrations", { method: "POST", body: JSON.stringify(payload) });
+
+    const ecDelta = measuredEc - latestCalculation.predictedEc;
+    const phDelta = measuredPh - latestCalculation.predictedPh;
+    calibrationStatus.textContent =
+      `已保存。EC 偏差 ${ecDelta >= 0 ? "+" : ""}${formatNumber(ecDelta)} uS/cm，pH 偏差 ${phDelta >= 0 ? "+" : ""}${phDelta.toFixed(2)}。`;
+    await loadPHCalibration();
+  } catch (error) {
+    console.error(error);
+    calibrationStatus.textContent = `保存失败：${error?.message || "请确认本地后端已启动"}`;
+  } finally {
+    saveTitrationBtn.disabled = false;
+  }
+}
+
+function buildWaterReportPayload() {
+  return {
+    name: state.lastWaterSource ? `原水-${state.lastWaterSource}` : `原水-${formatDateTimeForName()}`,
+    tested_at: new Date().toISOString().slice(0, 10),
+    no3_n: state.water["NO3-N"] || 0,
+    nh4_n: state.water["NH4-N"] || 0,
+    n: state.water.N || 0,
+    p: state.water.P || 0,
+    k: state.water.K || 0,
+    ca: state.water.Ca || 0,
+    mg: state.water.Mg || 0,
+    s: state.water.S || 0,
+    cl: state.water.Cl || 0,
+    fe: state.water.Fe || 0,
+    mn: state.water.Mn || 0,
+    zn: state.water.Zn || 0,
+    b: state.water.B || 0,
+    cu: state.water.Cu || 0,
+    mo: state.water.Mo || 0,
+    na: state.water.Na || 0,
+    si: state.water.Si || 0,
+    hco3: state.water.HCO3 || 0,
+    ec: state.water.EC || 0,
+    ph: state.water.pH || 0,
+    notes: state.isRoWater ? "RO水灌溉模式保存" : null
+  };
+}
+
+function buildFormulaPayload() {
+  return {
+    name: state.lastFormulaSource ? `配方-${state.lastFormulaSource}` : `配方-${formatDateTimeForName()}`,
+    description: "由功能1实测校准记录自动保存",
+    a_tank_volume: getNumericField("aTankVolume") || 100,
+    a_dilution: getNumericField("aDilution") || 100,
+    b_tank_volume: getNumericField("bTankVolume") || 100,
+    b_dilution: getNumericField("bDilution") || 100,
+    a_rows: serializeBucketRows(state.bucketA),
+    b_rows: serializeBucketRows(state.bucketB)
+  };
+}
+
+function serializeBucketRows(rows) {
+  return rows.map((row) => ({
+    fertilizerId: row.fertilizerId,
+    amount: Number(row.amount) || 0,
+    unit: row.unit || "kg"
+  }));
+}
+
+function cleanNumericMap(map) {
+  return Object.fromEntries(
+    Object.entries(map || {}).filter(([, value]) => Number.isFinite(Number(value)))
+      .map(([key, value]) => [key, Number(value)])
+  );
+}
+
+function formatDateTimeForName() {
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
 }
 
 function exportResults() {
@@ -1795,22 +2100,34 @@ function exportSelectedFormula() {
 
   const volume = Number(document.querySelector("#formulaExportVolume")?.value || 100);
   const format = document.querySelector("#formulaExportFormat")?.value || "xlsx";
-  const rows = buildFormulaExportRows(selected, volume);
+  const currentFormula = buildCurrentFormulaSnapshot(selected);
+  const rows = buildFormulaExportRows(currentFormula, volume);
+  recordFormulaAdjustment(selected, currentFormula);
 
   if (format === "pdf") {
-    exportFormulaPdf(selected, volume, rows);
+    exportFormulaPdf(currentFormula, volume, rows);
   } else {
-    exportFormulaWorkbook(selected, volume, rows);
+    exportFormulaWorkbook(currentFormula, volume, rows);
   }
 
-  state.reverseSuggestions = [selected];
-  state.selectedReverseIndex = 0;
-  renderReverseSuggestions(state.reverseSuggestions);
   const statusEl = document.querySelector("#calcStatus");
-  if (statusEl) statusEl.textContent = `已导出「${selected.name}」，未选方案已收起`;
+  if (statusEl) statusEl.textContent = `已导出当前微调后的「${selected.name}」`;
+  const exportStatus = document.querySelector("#formulaExportStatus");
+  if (exportStatus) exportStatus.textContent = "已记录本次微调与原建议方案的差异，可用于后续优化建议算法。";
 }
 
-function buildFormulaExportRows(suggestion, volume) {
+function buildCurrentFormulaSnapshot(selected) {
+  return {
+    id: `${selected.id || "custom"}-adjusted`,
+    name: `${selected.name}（微调后）`,
+    sourceSuggestionId: selected.id,
+    sourceSuggestionName: selected.name,
+    bucketA: state.bucketA.map((row) => ({ ...row })),
+    bucketB: state.bucketB.map((row) => ({ ...row }))
+  };
+}
+
+function buildFormulaExportRows(formula, volume) {
   const aBase = getNumericField("aTankVolume") || 100;
   const bBase = getNumericField("bTankVolume") || 100;
   const buildRows = (bucket, sourceRows, baseVolume) => sourceRows.map((row) => {
@@ -1827,15 +2144,16 @@ function buildFormulaExportRows(suggestion, volume) {
   });
 
   return [
-    ...buildRows("A", suggestion.bucketA, aBase),
-    ...buildRows("B", suggestion.bucketB, bBase)
+    ...buildRows("A", formula.bucketA, aBase),
+    ...buildRows("B", formula.bucketB, bBase)
   ];
 }
 
-function exportFormulaWorkbook(suggestion, volume, rows) {
+function exportFormulaWorkbook(formula, volume, rows) {
   const data = [
     ["FertiCal 配方导出"],
-    ["方案", suggestion.name],
+    ["方案", formula.name],
+    ["来源建议", formula.sourceSuggestionName || formula.name],
     ["AB肥配制量", `${volume} L`],
     ["导出时间", new Date().toLocaleString("zh-CN")],
     [],
@@ -1847,21 +2165,21 @@ function exportFormulaWorkbook(suggestion, volume, rows) {
     const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "配方");
-    XLSX.writeFile(wb, `FertiCal-配方-${suggestion.id}-${volume}L-${dateStamp()}.xlsx`);
+    XLSX.writeFile(wb, `FertiCal-配方-${formula.id}-${volume}L-${dateStamp()}.xlsx`);
     return;
   }
 
   const csv = data.map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
-  downloadTextFile(`FertiCal-配方-${suggestion.id}-${volume}L-${dateStamp()}.csv`, "\ufeff" + csv, "text/csv;charset=utf-8");
+  downloadTextFile(`FertiCal-配方-${formula.id}-${volume}L-${dateStamp()}.csv`, "\ufeff" + csv, "text/csv;charset=utf-8");
 }
 
-function exportFormulaPdf(suggestion, volume, rows) {
+function exportFormulaPdf(formula, volume, rows) {
   const html = `
     <!doctype html>
     <html lang="zh-CN">
       <head>
         <meta charset="utf-8">
-        <title>FertiCal 配方 - ${escapeHtml(suggestion.name)}</title>
+        <title>FertiCal 配方 - ${escapeHtml(formula.name)}</title>
         <style>
           body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 32px; color: #111827; }
           h1 { font-size: 22px; margin: 0 0 8px; }
@@ -1874,7 +2192,7 @@ function exportFormulaPdf(suggestion, volume, rows) {
       </head>
       <body>
         <h1>FertiCal 配方导出</h1>
-        <p>方案：${escapeHtml(suggestion.name)} · AB肥配制量：${volume} L · ${escapeHtml(new Date().toLocaleString("zh-CN"))}</p>
+        <p>方案：${escapeHtml(formula.name)} · 来源建议：${escapeHtml(formula.sourceSuggestionName || formula.name)} · AB肥配制量：${volume} L · ${escapeHtml(new Date().toLocaleString("zh-CN"))}</p>
         <table>
           <thead><tr><th>桶</th><th>肥料</th><th>用量</th><th>备注</th></tr></thead>
           <tbody>
@@ -1897,9 +2215,85 @@ function exportFormulaPdf(suggestion, volume, rows) {
   const url = URL.createObjectURL(blob);
   const win = window.open(url, "_blank");
   if (!win) {
-    downloadTextFile(`FertiCal-配方-${suggestion.id}-${volume}L-${dateStamp()}.html`, html, "text/html;charset=utf-8");
+    downloadTextFile(`FertiCal-配方-${formula.id}-${volume}L-${dateStamp()}.html`, html, "text/html;charset=utf-8");
   }
   setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+function recordFormulaAdjustment(suggestion, formula) {
+  const record = {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    suggestionId: suggestion.id,
+    suggestionName: suggestion.name,
+    cropType: state.cropType,
+    tanks: {
+      aVolume: getNumericField("aTankVolume"),
+      aDilution: getNumericField("aDilution"),
+      bVolume: getNumericField("bTankVolume"),
+      bDilution: getNumericField("bDilution")
+    },
+    targets: { ...state.targets },
+    water: { ...state.water },
+    suggested: {
+      bucketA: normalizeFormulaRows(suggestion.bucketA),
+      bucketB: normalizeFormulaRows(suggestion.bucketB)
+    },
+    final: {
+      bucketA: normalizeFormulaRows(formula.bucketA),
+      bucketB: normalizeFormulaRows(formula.bucketB)
+    },
+    differences: [
+      ...compareFormulaRows("A", suggestion.bucketA, formula.bucketA),
+      ...compareFormulaRows("B", suggestion.bucketB, formula.bucketB)
+    ]
+  };
+
+  try {
+    const key = "fertical-formula-adjustments-v1";
+    const existing = JSON.parse(localStorage.getItem(key) || "[]");
+    existing.push(record);
+    localStorage.setItem(key, JSON.stringify(existing.slice(-200)));
+  } catch (error) {
+    console.warn("Formula adjustment record was not saved", error);
+  }
+}
+
+function normalizeFormulaRows(rows) {
+  return rows.map((row) => ({
+    fertilizerId: row.fertilizerId,
+    fertilizer: getFertilizer(row.fertilizerId).name,
+    amountKg: row.unit === "kg" ? Number(row.amount || 0) : Number(row.amount || 0) / 1000
+  }));
+}
+
+function compareFormulaRows(bucket, suggestedRows, finalRows) {
+  const suggested = mapFormulaAmounts(suggestedRows);
+  const final = mapFormulaAmounts(finalRows);
+  const ids = new Set([...suggested.keys(), ...final.keys()]);
+  return Array.from(ids).map((fertilizerId) => {
+    const suggestedKg = suggested.get(fertilizerId) || 0;
+    const finalKg = final.get(fertilizerId) || 0;
+    const deltaKg = finalKg - suggestedKg;
+    return {
+      bucket,
+      fertilizerId,
+      fertilizer: getFertilizer(fertilizerId).name,
+      suggestedKg,
+      finalKg,
+      deltaKg,
+      deltaRatio: suggestedKg > 0 ? deltaKg / suggestedKg : null
+    };
+  }).filter((item) => Math.abs(item.deltaKg) > 0.000001);
+}
+
+function mapFormulaAmounts(rows) {
+  const map = new Map();
+  rows.forEach((row) => {
+    const amountKg = row.unit === "kg" ? Number(row.amount || 0) : Number(row.amount || 0) / 1000;
+    map.set(row.fertilizerId, (map.get(row.fertilizerId) || 0) + amountKg);
+  });
+  return map;
 }
 
 function downloadTextFile(fileName, content, type) {
@@ -1938,8 +2332,13 @@ function calculateReverse() {
   const suggestions = generateReverseSuggestions();
   state.reverseSuggestions = suggestions;
   state.selectedReverseIndex = null;
+  updateBucketGridVisibility();
   if (!suggestions.length) {
-    if (statusEl) statusEl.textContent = "请先设置至少一个高于原水背景的目标浓度";
+    if (statusEl) {
+      statusEl.textContent = getActiveReverseTargets().length
+        ? "当前目标与库存约束下暂未生成可用配方，请调整目标或开放更多原料"
+        : "请先设置至少一个高于原水背景的目标浓度";
+    }
     renderReverseSuggestions([]);
     return;
   }
@@ -1977,25 +2376,25 @@ function generateReverseSuggestions() {
 }
 
 function buildReverseSuggestion(profile) {
-  const targetElements = ["N", "P", "K", "Ca", "Mg", "S", "Cl", "Fe", "Mn", "Zn", "B", "Cu", "Mo"];
-  const activeTargets = targetElements
-    .filter((key) =>
-      !LOW_CONTENT_KEYS.has(key) &&
-      typeof state.targets[key] === "number" &&
-      Number.isFinite(state.targets[key])
-    )
-    .map((key) => {
-      const waterValue = toMmolPerLiter(key, state.water[key] ?? 0) ?? 0;
-      return {
-        key,
-        need: Math.max(0, state.targets[key] - waterValue),
-        target: state.targets[key],
-        weight: reverseTargetWeight(key)
-      };
-    })
-    .filter((item) => item.need > 0);
+  const acidPlans = buildAcidPrefeedPlans(profile);
+  const suggestions = acidPlans
+    .map((acidPlan) => buildReverseSuggestionWithAcidPlan(profile, acidPlan))
+    .filter(Boolean);
 
-  if (!activeTargets.length) return null;
+  return suggestions.sort((a, b) => a.score - b.score)[0] ?? null;
+}
+
+function buildReverseSuggestionWithAcidPlan(profile, acidPlan) {
+  const activeTargets = getActiveReverseTargets(acidPlan.nutrients);
+
+  if (!activeTargets.length) {
+    const bucketA = acidPlan.bucketA.map((row) => ({ ...row }));
+    const bucketB = acidPlan.bucketB.map((row) => ({ ...row }));
+    applyPHTargetAdjustment(profile, bucketA, bucketB);
+    return bucketA.length || bucketB.length
+      ? evaluateReverseSuggestion(profile, bucketA, bucketB)
+      : null;
+  }
 
   const aTank = getNumericField("aTankVolume");
   const aDilution = getNumericField("aDilution");
@@ -2041,8 +2440,8 @@ function buildReverseSuggestion(profile) {
   const solution = solveNonNegativeLeastSquares(matrix, target);
   if (!solution) return null;
 
-  const bucketA = [];
-  const bucketB = [];
+  const bucketA = acidPlan.bucketA.map((row) => ({ ...row }));
+  const bucketB = acidPlan.bucketB.map((row) => ({ ...row }));
   solution.forEach((amount, index) => {
     const rounded = roundAmount(amount);
     if (rounded <= 0.001) return;
@@ -2066,6 +2465,179 @@ function buildReverseSuggestion(profile) {
   return evaluateReverseSuggestion(profile, bucketA, bucketB);
 }
 
+function buildAcidPrefeedPlans(profile) {
+  const acidDemand = estimateAlkalinityAcidDemand();
+  const emptyPlan = {
+    bucketA: [],
+    bucketB: [],
+    nutrients: emptyElementMap(),
+    fertilizerIds: new Set()
+  };
+
+  if (!(acidDemand > ACID_PREFEED_MIN_MMOL)) return [emptyPlan];
+
+  const nitricAvailable = isAcidAvailableForPrefeed("hno3-40", "A", profile);
+  const phosphoricAvailable = isAcidAvailableForPrefeed("h3po4-85", "B", profile);
+  if (!nitricAvailable && !phosphoricAvailable) return [emptyPlan];
+
+  const targetNo3 = getNitricAcidNutrientSpace();
+  const targetP = getTargetNutrientSpace("P");
+  const phosphoricLimit = phosphoricAvailable ? getPhosphoricPrefeedLimit(acidDemand, targetNo3, targetP) : 0;
+  const nitricSplits = new Set();
+
+  if (nitricAvailable && phosphoricAvailable) {
+    const minimumNitric = roundMmol(Math.max(0, acidDemand - phosphoricLimit));
+    for (let i = 0; i <= 12; i++) {
+      nitricSplits.add(roundMmol(minimumNitric + (acidDemand - minimumNitric) * i / 12));
+    }
+    [
+      minimumNitric,
+      targetNo3,
+      acidDemand - phosphoricLimit,
+      (targetNo3 + acidDemand - targetP) / 2
+    ].forEach((value) => nitricSplits.add(roundMmol(clamp(value, 0, acidDemand))));
+  } else {
+    nitricSplits.add(nitricAvailable ? roundMmol(acidDemand) : 0);
+  }
+
+  const plans = [...nitricSplits]
+    .map((nitricMmol) => createAcidPrefeedPlan(
+      nitricAvailable ? clamp(nitricMmol, 0, acidDemand) : 0,
+      phosphoricAvailable ? Math.min(phosphoricLimit, acidDemand - clamp(nitricMmol, 0, acidDemand)) : 0
+    ))
+    .filter((plan) => plan.bucketA.length || plan.bucketB.length);
+
+  return plans.length ? plans : [emptyPlan];
+}
+
+function getPhosphoricPrefeedLimit(acidDemand, targetNo3, targetP) {
+  if (!(targetP > 0)) return 0;
+  return clamp(targetP, 0, acidDemand);
+}
+
+function isAcidAvailableForPrefeed(fertilizerId, bucket, profile) {
+  return state.inventory[fertilizerId] &&
+    !profile.exclude.includes(fertilizerId) &&
+    getCatalogByBucket(bucket).some((item) => item.id === fertilizerId);
+}
+
+function createAcidPrefeedPlan(nitricMmol, phosphoricMmol) {
+  const plan = {
+    bucketA: [],
+    bucketB: [],
+    nutrients: emptyElementMap(),
+    fertilizerIds: new Set()
+  };
+
+  if (nitricMmol > ACID_PREFEED_MIN_MMOL) {
+    const amount = acidMmolToKg("hno3-40", "A", nitricMmol);
+    if (amount > 0) {
+      plan.bucketA.push({ id: crypto.randomUUID(), fertilizerId: "hno3-40", amount, unit: "kg" });
+      plan.nutrients["NO3-N"] += nitricMmol;
+      plan.nutrients.N += nitricMmol;
+      plan.fertilizerIds.add("hno3-40");
+    }
+  }
+
+  if (phosphoricMmol > ACID_PREFEED_MIN_MMOL) {
+    const amount = acidMmolToKg("h3po4-85", "B", phosphoricMmol);
+    if (amount > 0) {
+      plan.bucketB.push({ id: crypto.randomUUID(), fertilizerId: "h3po4-85", amount, unit: "kg" });
+      plan.nutrients.P += phosphoricMmol;
+      plan.fertilizerIds.add("h3po4-85");
+    }
+  }
+
+  return plan;
+}
+
+function acidMmolToKg(fertilizerId, bucket, mmolPerLiter) {
+  const fertilizer = getFertilizer(fertilizerId);
+  const acid = fertilizer.acidContrib?.[0];
+  const tankVolume = getNumericField(bucket === "A" ? "aTankVolume" : "bTankVolume");
+  const dilution = getNumericField(bucket === "A" ? "aDilution" : "bDilution");
+  if (!acid || !tankVolume || !dilution) return 0;
+  const kg = mmolPerLiter * tankVolume * dilution * acid.molarMass / acid.purity / 1e6;
+  return roundAmount(kg);
+}
+
+function estimateAlkalinityAcidDemand() {
+  const targetPH = state.targets.pH;
+  if (!(typeof targetPH === "number" && Number.isFinite(targetPH) && targetPH > 0)) return 0;
+
+  const waterMmol = buildWaterMmol();
+  const sourceAlkalinity = carbonateAlkalinityFromMmol(waterMmol, state.water?.pH);
+  if (sourceAlkalinity <= TARGET_RESIDUAL_HCO3_MMOL) return 0;
+
+  const waterPH = (typeof state.water?.pH === "number" && Number.isFinite(state.water.pH) && state.water.pH > 0)
+    ? state.water.pH : 7.5;
+  if (waterPH <= targetPH + 0.03) return 0;
+
+  const residualDemand = Math.max(0, sourceAlkalinity - TARGET_RESIDUAL_HCO3_MMOL);
+  let low = 0;
+  let high = Math.max(residualDemand, sourceAlkalinity * 0.25, ACID_PREFEED_MIN_MMOL);
+
+  for (let i = 0; i < 16 && calculatePH(waterMmol, { strong: high, h3po4: 0, h2po4: 0 }) > targetPH; i++) {
+    high *= 1.5;
+    if (high >= sourceAlkalinity) {
+      high = sourceAlkalinity;
+      break;
+    }
+  }
+
+  for (let i = 0; i < 28; i++) {
+    const mid = (low + high) / 2;
+    if (calculatePH(waterMmol, { strong: mid, h3po4: 0, h2po4: 0 }) > targetPH) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+
+  return roundMmol(clamp(Math.max(high, residualDemand), 0, sourceAlkalinity));
+}
+
+function getNitricAcidNutrientSpace() {
+  if (typeof state.targets["NO3-N"] === "number" && Number.isFinite(state.targets["NO3-N"])) {
+    return getTargetNutrientSpace("NO3-N");
+  }
+  return getTargetNutrientSpace("N");
+}
+
+function getTargetNutrientSpace(key) {
+  const target = state.targets[key];
+  if (!(typeof target === "number" && Number.isFinite(target) && target > 0)) return 0;
+  const waterValue = toMmolPerLiter(key, state.water[key] ?? 0) ?? 0;
+  return Math.max(0, target - waterValue);
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, Number(value) || 0));
+}
+
+function roundMmol(value) {
+  return Number((Number(value) || 0).toFixed(4));
+}
+
+function getActiveReverseTargets(prefeedMmol = null) {
+  return getReverseTargetElements()
+    .filter((key) =>
+      typeof state.targets[key] === "number" &&
+      Number.isFinite(state.targets[key])
+    )
+    .map((key) => {
+      const waterValue = toMmolPerLiter(key, state.water[key] ?? 0) ?? 0;
+      const prefeedValue = prefeedMmol?.[key] ?? 0;
+      return {
+        key,
+        need: Math.max(0, state.targets[key] - waterValue - prefeedValue),
+        target: state.targets[key],
+        weight: reverseTargetWeight(key)
+      };
+    })
+    .filter((item) => item.need > 0);
+}
+
 function contributionPerKg(variable, key, config) {
   const tankVolume = variable.bucket === "A" ? config.aTank : config.bTank;
   const dilution = variable.bucket === "A" ? config.aDilution : config.bDilution;
@@ -2079,6 +2651,14 @@ function contributionPerKg(variable, key, config) {
     }
   });
   return mmol;
+}
+
+function getReverseTargetElements() {
+  const hasSpecificNitrogen =
+    typeof state.targets["NO3-N"] === "number" ||
+    typeof state.targets["NH4-N"] === "number";
+  const nitrogenKeys = hasSpecificNitrogen ? ["NO3-N", "NH4-N"] : ["N"];
+  return [...nitrogenKeys, "P", "K", "Ca", "Mg", "S", "Cl", "Fe", "Mn", "Zn", "B", "Cu", "Mo"];
 }
 
 function isTraceSulfateFertilizer(fertilizerId) {
@@ -2145,6 +2725,7 @@ function evaluateReverseSuggestion(profile, bucketA, bucketB) {
   const acidProfile = buildTotalAcidProfile(aResult, bResult);
   const phValue = calculatePH(totalMmol, acidProfile);
   const phTarget = state.targets.pH;
+  const phAssessment = assessPHDeviation(phValue, phTarget);
   const phDeviation = typeof phTarget === "number" && Number.isFinite(phTarget) && phTarget > 0
     ? {
         key: "pH",
@@ -2152,31 +2733,40 @@ function evaluateReverseSuggestion(profile, bucketA, bucketB) {
         target: phTarget,
         ratio: (phValue - phTarget) / phTarget,
         delta: phValue - phTarget,
-        cls: deviationClass((phValue - phTarget) / phTarget, "pH")
+        cls: phAssessment?.cls || deviationClass((phValue - phTarget) / phTarget, "pH")
       }
     : null;
-  const trackedKeys = ["N", "P", "K", "Ca", "Mg", "S", "Cl", "Fe", "Mn", "Zn", "B", "Cu", "Mo"];
+  const trackedKeys = getReverseTargetElements();
   const deviations = trackedKeys
     .filter((key) => typeof state.targets[key] === "number" && state.targets[key] > 0)
     .map((key) => {
       const actual = totalMmol[key] ?? 0;
       const target = state.targets[key];
       const ratio = (actual - target) / target;
+      if (key === "NH4-N") {
+        const totalNitrogen = (totalMmol["NO3-N"] ?? 0) + (totalMmol["NH4-N"] ?? 0);
+        const share = totalNitrogen > 0 ? actual / totalNitrogen : 0;
+        return {
+          key,
+          actual,
+          target,
+          ratio,
+          nh4Share: share,
+          displayText: `NH4-N 占N ${formatNumber(share * 100)}%`,
+          cls: nh4ShareClass(actual, share)
+        };
+      }
       return { key, actual, target, ratio, cls: deviationClass(ratio, key) };
     });
 
   const estimatedCost = calculateSuggestionCost(bucketA, bucketB);
   const costScore = profile.costPenalty ? Math.min(estimatedCost / 180, 3) : 0;
   const score = deviations.reduce((sum, item) => {
-    if (LOW_CONTENT_KEYS.has(item.key)) {
-      return sum + lowContentScore(item.key, item.actual, item.target);
-    }
-    const tolerance = 0.3;
-    return sum + Math.min(Math.abs(item.ratio) / tolerance, 4);
+    return sum + reverseDeviationScore(item);
   }, 0) +
-    lowContentScoreForUntargeted(totalMmol) +
-    (phDeviation ? Math.min(Math.abs(phDeviation.delta) / 0.3, 4) : 0) +
+    (phAssessment?.penalty ?? 0) +
     (bucketA.length + bucketB.length) * 0.04 +
+    nitricAcidRegulatoryScore(bucketA, bucketB) +
     costScore;
 
   return {
@@ -2189,33 +2779,121 @@ function evaluateReverseSuggestion(profile, bucketA, bucketB) {
     pH: phValue,
     deviations,
     phDeviation,
+    phLimit: phAssessment,
     estimatedCost,
     score
   };
+}
+
+function nitricAcidRegulatoryScore(bucketA, bucketB) {
+  return [...bucketA, ...bucketB].reduce((sum, row) => {
+    if (row.fertilizerId !== "hno3-40") return sum;
+    return sum + (Number(row.amount) || 0) * NITRIC_ACID_REGULATORY_PENALTY_PER_KG;
+  }, 0);
+}
+
+function reverseDeviationScore(item) {
+  if (item.key === "NH4-N") return nh4ShareScore(item.actual, item.nh4Share);
+  const thresholds = reverseDeviationThresholds(item.key);
+  if (thresholds.freeUndershoot && item.ratio <= 0) return 0;
+  if (item.ratio >= thresholds.safeLow && item.ratio <= thresholds.safeHigh) return 0;
+
+  const excess = item.ratio < thresholds.safeLow
+    ? thresholds.safeLow - item.ratio
+    : item.ratio - thresholds.safeHigh;
+  const warnSpan = item.ratio < thresholds.safeLow
+    ? thresholds.safeLow - thresholds.warnLow
+    : thresholds.warnHigh - thresholds.safeHigh;
+
+  if (warnSpan > 0 && excess <= warnSpan) {
+    return Math.min(excess / warnSpan, 1);
+  }
+  return 1 + Math.min((excess - warnSpan) / 0.25, 4);
+}
+
+function nh4ShareLimits() {
+  return state.cropType === "tomato" ? NH4_SHARE_LIMITS.tomato : NH4_SHARE_LIMITS.default;
+}
+
+function nh4ShareClass(actual, share) {
+  if (!(actual > 0)) return "dev-bad";
+  const limits = nh4ShareLimits();
+  if (share > limits.bad) return "dev-bad";
+  if (share > limits.warn) return "dev-warn";
+  return "dev-good";
+}
+
+function nh4ShareScore(actual, share) {
+  if (!(actual > 0)) return 4;
+  const limits = nh4ShareLimits();
+  if (share <= limits.warn) return 0;
+  if (share <= limits.bad) return (share - limits.warn) / (limits.bad - limits.warn);
+  return 1 + Math.min((share - limits.bad) / 0.1, 4);
+}
+
+function reverseDeviationBand(item) {
+  const thresholds = reverseDeviationThresholds(item.key);
+  if (thresholds.freeUndershoot && item.ratio <= 0) return "dev-good";
+  if (item.ratio >= thresholds.safeLow && item.ratio <= thresholds.safeHigh) return "dev-good";
+  if (item.ratio >= thresholds.warnLow && item.ratio <= thresholds.warnHigh) return "dev-warn";
+  return "dev-bad";
+}
+
+function reverseDeviationThresholds(key) {
+  if (TRACE_FERTILIZER_KEYS.has(key)) {
+    return {
+      safeLow: -0.10,
+      safeHigh: 0.15,
+      warnLow: -0.20,
+      warnHigh: 0.25,
+      freeUndershoot: false
+    };
+  }
+
+  return {
+    safeLow: -0.15,
+    safeHigh: 0.15,
+    warnLow: -0.25,
+    warnHigh: 0.25,
+    freeUndershoot: UNDERSHOOT_ALLOWED_KEYS.has(key)
+  };
+}
+
+function assessPHDeviation(phValue, phTarget) {
+  if (!(Number.isFinite(phValue) && Number.isFinite(phTarget) && phTarget > 0)) return null;
+  const delta = phValue - phTarget;
+  const absDelta = Math.abs(delta);
+  if (absDelta > PH_TARGET_REJECT_DELTA) {
+    return {
+      cls: "dev-bad",
+      text: `pH 偏离目标 ${formatSigned(delta)}，超过 ${PH_TARGET_REJECT_DELTA.toFixed(1)}，需调酸复核`,
+      penalty: 8 + Math.min((absDelta - PH_TARGET_REJECT_DELTA) / 0.4, 4)
+    };
+  }
+  if (absDelta > PH_TARGET_WARN_DELTA) {
+    return {
+      cls: "dev-warn",
+      text: `pH 偏离目标 ${formatSigned(delta)}，超过 ${PH_TARGET_WARN_DELTA.toFixed(1)}`,
+      penalty: 2 + Math.min((absDelta - PH_TARGET_WARN_DELTA) / (PH_TARGET_REJECT_DELTA - PH_TARGET_WARN_DELTA), 1) * 4
+    };
+  }
+  if (absDelta > PH_TARGET_SAFE_DELTA) {
+    return {
+      cls: "dev-good",
+      penalty: Math.min((absDelta - PH_TARGET_SAFE_DELTA) / (PH_TARGET_WARN_DELTA - PH_TARGET_SAFE_DELTA), 1)
+    };
+  }
+  return { cls: "dev-good", penalty: 0 };
+}
+
+function formatSigned(value) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 }
 
 function calculateSuggestionCost(bucketA, bucketB) {
   return [...bucketA, ...bucketB].reduce((sum, row) => {
     return sum + (Number(row.amount) || 0) * getFertilizerPrice(row.fertilizerId);
   }, 0);
-}
-
-function lowContentScoreForUntargeted(totalMmol) {
-  return Array.from(LOW_CONTENT_KEYS).reduce((sum, key) => {
-    const hasTarget = typeof state.targets[key] === "number" && state.targets[key] > 0;
-    return hasTarget ? sum : sum + lowContentScore(key, totalMmol[key] ?? 0, null);
-  }, 0);
-}
-
-function lowContentScore(key, actual, target = null) {
-  const benchmark = LOW_CONTENT_BENCHMARK[key] ?? 1;
-  const weight = LOW_CONTENT_WEIGHT[key] ?? 0.5;
-  const baseline = Math.min((actual || 0) / benchmark, 6) * weight;
-  if (!(typeof target === "number" && Number.isFinite(target) && target > 0)) {
-    return baseline;
-  }
-  const excessRatio = Math.max(0, ((actual || 0) - target) / target);
-  return baseline + Math.min(excessRatio / 0.3, 5);
 }
 
 function applyPHTargetAdjustment(profile, bucketA, bucketB) {
@@ -2226,8 +2904,8 @@ function applyPHTargetAdjustment(profile, bucketA, bucketB) {
   if (!Number.isFinite(currentPH) || currentPH <= targetPH + 0.03) return;
 
   const candidates = [
-    { fertilizerId: "hno3-40", bucket: "A" },
-    { fertilizerId: "h3po4-85", bucket: "B" }
+    { fertilizerId: "h3po4-85", bucket: "B" },
+    { fertilizerId: "hno3-40", bucket: "A" }
   ].filter((candidate) => {
     const fertilizer = getFertilizer(candidate.fertilizerId);
     return state.inventory[candidate.fertilizerId] &&
@@ -2252,31 +2930,33 @@ function applyPHTargetAdjustment(profile, bucketA, bucketB) {
       high *= 2;
     }
 
-    if (high > 20) continue;
+    let adjustedAmount = high <= 20
+      ? findAcidAmountForTargetPH(candidate, rows, bucketA, bucketB, baseAmount, high, targetPH)
+      : findMaxSafeAcidAmount(candidate, rows, baseAmount);
+    adjustedAmount = capAcidAdjustmentAmount(candidate, adjustedAmount);
+    if (!(adjustedAmount > baseAmount)) continue;
 
-    let low = baseAmount;
-    for (let i = 0; i < 28; i++) {
-      const mid = (low + high) / 2;
-      const testRows = withAdjustedFertilizer(rows, candidate.fertilizerId, mid);
-      const testPH = candidate.bucket === "A"
-        ? estimateSuggestionPH(testRows, bucketB)
-        : estimateSuggestionPH(bucketA, testRows);
-      if (testPH > targetPH) {
-        low = mid;
-      } else {
-        high = mid;
-      }
+    let adjustedRows = withAdjustedFertilizer(rows, candidate.fertilizerId, adjustedAmount);
+    let adjustedBucketA = candidate.bucket === "A" ? adjustedRows : bucketA;
+    let adjustedBucketB = candidate.bucket === "B" ? adjustedRows : bucketB;
+    let stockPH = estimateBucketStockPH(candidate.bucket, adjustedRows);
+    if (!Number.isFinite(stockPH) || stockPH < MIN_AUTO_ACID_STOCK_PH) {
+      adjustedAmount = findMaxSafeAcidAmount(candidate, rows, baseAmount);
+      if (!(adjustedAmount > baseAmount)) continue;
+      adjustedRows = withAdjustedFertilizer(rows, candidate.fertilizerId, adjustedAmount);
+      adjustedBucketA = candidate.bucket === "A" ? adjustedRows : bucketA;
+      adjustedBucketB = candidate.bucket === "B" ? adjustedRows : bucketB;
+      stockPH = estimateBucketStockPH(candidate.bucket, adjustedRows);
     }
-
-    const adjustedAmount = roundAmount(high);
-    const adjustedRows = withAdjustedFertilizer(rows, candidate.fertilizerId, adjustedAmount);
-    const adjustedBucketA = candidate.bucket === "A" ? adjustedRows : bucketA;
-    const adjustedBucketB = candidate.bucket === "B" ? adjustedRows : bucketB;
-    const stockPH = estimateBucketStockPH(candidate.bucket, adjustedRows);
     if (!Number.isFinite(stockPH) || stockPH < MIN_AUTO_ACID_STOCK_PH) continue;
 
     const finalPH = estimateSuggestionPH(adjustedBucketA, adjustedBucketB);
-    const cost = Math.abs(finalPH - targetPH) + Math.max(0, MIN_AUTO_ACID_STOCK_PH + 0.4 - stockPH) * 0.5;
+    if (!Number.isFinite(finalPH) || finalPH >= currentPH - 0.02) continue;
+    const cost = Math.abs(finalPH - targetPH) +
+      Math.max(0, Math.abs(finalPH - targetPH) - PH_TARGET_SAFE_DELTA) * 2 +
+      Math.max(0, MIN_AUTO_ACID_STOCK_PH + 0.4 - stockPH) * 0.5 +
+      acidAdjustmentNutrientPenalty(adjustedBucketA, adjustedBucketB) +
+      nitricAcidRegulatoryScore(adjustedBucketA, adjustedBucketB);
     if (!bestAdjustment || cost < bestAdjustment.cost) {
       bestAdjustment = { candidate, adjustedAmount, cost };
     }
@@ -2297,6 +2977,172 @@ function applyPHTargetAdjustment(profile, bucketA, bucketB) {
       unit: "kg"
     });
   }
+
+  applySupplementalPhosphoricAcid(profile, bucketA, bucketB);
+}
+
+function applySupplementalPhosphoricAcid(profile, bucketA, bucketB) {
+  const targetPH = state.targets.pH;
+  const targetP = state.targets.P;
+  if (!(typeof targetPH === "number" && Number.isFinite(targetPH) && targetPH > 0)) return;
+  if (!(typeof targetP === "number" && Number.isFinite(targetP) && targetP > 0)) return;
+  if (!state.inventory["h3po4-85"] || profile.exclude.includes("h3po4-85")) return;
+
+  const current = summarizeAcidAdjustment(bucketA, bucketB);
+  if (!Number.isFinite(current.pH) || current.pH <= targetPH + 0.03) return;
+  if (!Number.isFinite(current.total.P) || current.total.P >= targetP * 1.15) return;
+
+  const existing = bucketB.find((row) => row.fertilizerId === "h3po4-85");
+  const baseAmount = existing?.unit === "kg" ? existing.amount : 0;
+  const maxAmount = acidMmolToKg(
+    "h3po4-85",
+    "B",
+    getPhosphoricPrefeedLimit(
+      estimateAlkalinityAcidDemand(),
+      getNitricAcidNutrientSpace(),
+      getTargetNutrientSpace("P")
+    )
+  );
+  if (!(maxAmount > baseAmount)) return;
+  let high = Math.max(baseAmount + 0.05, 0.05);
+  let bestAmount = baseAmount;
+
+  for (let i = 0; i < 18 && high <= Math.min(20, maxAmount); i++) {
+    const candidateRows = withAdjustedFertilizer(bucketB, "h3po4-85", high);
+    const candidate = summarizeAcidAdjustment(bucketA, candidateRows);
+    if (
+      !Number.isFinite(candidate.pH) ||
+      !Number.isFinite(candidate.stockBPH) ||
+      candidate.stockBPH < MIN_AUTO_ACID_STOCK_PH ||
+      candidate.total.P > targetP * 1.15
+    ) break;
+
+    bestAmount = high;
+    if (candidate.pH <= targetPH + PH_TARGET_SAFE_DELTA) break;
+    high = Math.min(maxAmount, high * 2);
+  }
+
+  let low = bestAmount;
+  for (let i = 0; i < 24; i++) {
+    const mid = (low + high) / 2;
+    const candidateRows = withAdjustedFertilizer(bucketB, "h3po4-85", mid);
+    const candidate = summarizeAcidAdjustment(bucketA, candidateRows);
+    const valid = Number.isFinite(candidate.pH) &&
+      Number.isFinite(candidate.stockBPH) &&
+      candidate.stockBPH >= MIN_AUTO_ACID_STOCK_PH &&
+      candidate.total.P <= targetP * 1.15;
+    if (valid) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+
+  let adjustedAmount = Math.floor(low * 1000) / 1000;
+  while (adjustedAmount > baseAmount) {
+    const candidate = summarizeAcidAdjustment(bucketA, withAdjustedFertilizer(bucketB, "h3po4-85", adjustedAmount));
+    if (Number.isFinite(candidate.total.P) && candidate.total.P <= targetP * 1.15) break;
+    adjustedAmount = Number((adjustedAmount - 0.001).toFixed(3));
+  }
+  if (adjustedAmount <= baseAmount) return;
+
+  const adjustedRows = withAdjustedFertilizer(bucketB, "h3po4-85", adjustedAmount);
+  const adjusted = summarizeAcidAdjustment(bucketA, adjustedRows);
+  if (!Number.isFinite(adjusted.pH) || adjusted.pH >= current.pH - 0.02) return;
+
+  bucketB.splice(0, bucketB.length, ...adjustedRows);
+}
+
+function summarizeAcidAdjustment(bucketA, bucketB) {
+  const aResult = calculateBucket(bucketA, getNumericField("aTankVolume"), getNumericField("aDilution"));
+  const bResult = calculateBucket(bucketB, getNumericField("bTankVolume"), getNumericField("bDilution"));
+  const total = buildTotalMmol(aResult, bResult);
+  const acidProfile = buildTotalAcidProfile(aResult, bResult);
+  return {
+    total,
+    pH: calculatePH(total, acidProfile),
+    stockBPH: estimateBucketStockPH("B", bucketB)
+  };
+}
+
+function acidAdjustmentNutrientPenalty(bucketA, bucketB) {
+  const aResult = calculateBucket(bucketA, getNumericField("aTankVolume"), getNumericField("aDilution"));
+  const bResult = calculateBucket(bucketB, getNumericField("bTankVolume"), getNumericField("bDilution"));
+  const totalMmol = buildTotalMmol(aResult, bResult);
+  return ["NO3-N", "NH4-N", "N", "P", "K", "Ca", "Mg", "S"].reduce((sum, key) => {
+    const target = state.targets[key];
+    if (!(typeof target === "number" && Number.isFinite(target) && target > 0)) return sum;
+    if (key === "NH4-N") {
+      const totalNitrogen = (totalMmol["NO3-N"] ?? 0) + (totalMmol["NH4-N"] ?? 0);
+      const share = totalNitrogen > 0 ? (totalMmol["NH4-N"] ?? 0) / totalNitrogen : 0;
+      return sum + nh4ShareScore(totalMmol["NH4-N"] ?? 0, share) * 2;
+    }
+    if (UNDERSHOOT_ALLOWED_KEYS.has(key) && (totalMmol[key] ?? 0) <= target) return sum;
+    const ratio = ((totalMmol[key] ?? 0) - target) / target;
+    return sum + reverseDeviationScore({ key, ratio }) * 2;
+  }, 0);
+}
+
+function findAcidAmountForTargetPH(candidate, rows, bucketA, bucketB, low, high, targetPH) {
+  for (let i = 0; i < 28; i++) {
+    const mid = (low + high) / 2;
+    const testRows = withAdjustedFertilizer(rows, candidate.fertilizerId, mid);
+    const testPH = candidate.bucket === "A"
+      ? estimateSuggestionPH(testRows, bucketB)
+      : estimateSuggestionPH(bucketA, testRows);
+    if (testPH > targetPH) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+  return roundAmount(high);
+}
+
+function capAcidAdjustmentAmount(candidate, amount) {
+  if (candidate.fertilizerId !== "h3po4-85") return amount;
+  const acidDemand = estimateAlkalinityAcidDemand();
+  const limitMmol = getPhosphoricPrefeedLimit(
+    acidDemand,
+    getNitricAcidNutrientSpace(),
+    getTargetNutrientSpace("P")
+  );
+  if (!(limitMmol > 0)) return 0;
+  return Math.min(amount, acidMmolToKg("h3po4-85", "B", limitMmol));
+}
+
+function findMaxSafeAcidAmount(candidate, rows, baseAmount) {
+  let low = baseAmount;
+  let high = Math.max(baseAmount + 0.05, 0.05);
+  while (high <= 20) {
+    const stockPH = estimateBucketStockPH(candidate.bucket, withAdjustedFertilizer(rows, candidate.fertilizerId, high));
+    if (!Number.isFinite(stockPH) || stockPH < MIN_AUTO_ACID_STOCK_PH) break;
+    low = high;
+    high *= 2;
+  }
+
+  for (let i = 0; i < 28; i++) {
+    const mid = (low + high) / 2;
+    const stockPH = estimateBucketStockPH(candidate.bucket, withAdjustedFertilizer(rows, candidate.fertilizerId, mid));
+    if (Number.isFinite(stockPH) && stockPH >= MIN_AUTO_ACID_STOCK_PH) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+
+  let safeAmount = roundAmount(low);
+  while (safeAmount > baseAmount) {
+    const stockPH = estimateBucketStockPH(
+      candidate.bucket,
+      withAdjustedFertilizer(rows, candidate.fertilizerId, safeAmount)
+    );
+    if (Number.isFinite(stockPH) && stockPH >= MIN_AUTO_ACID_STOCK_PH) return safeAmount;
+    const step = safeAmount >= 1 ? 0.01 : 0.001;
+    safeAmount = Number(Math.max(baseAmount, safeAmount - step).toFixed(3));
+  }
+
+  return baseAmount;
 }
 
 function estimateBucketStockPH(bucket, rows) {
@@ -2345,12 +3191,11 @@ function renderReverseSuggestions(suggestions) {
   reverseSuggestionsEl.innerHTML = `
     <div class="suggestion-head">
       <h3>配方建议</h3>
-      <span class="muted">点击方案会写入 A/B 桶并计算，三套方案会保留用于比较</span>
+      <span class="muted">采用方案后可在 A/B 桶继续微调，再导出当前配方</span>
     </div>
     <div class="suggestion-grid">
       ${suggestions.map((suggestion, index) => renderSuggestionCard(suggestion, index)).join("")}
     </div>
-    ${renderSuggestionExportControls(suggestions)}
   `;
 
   reverseSuggestionsEl.querySelectorAll("[data-apply-suggestion]").forEach((button) => {
@@ -2359,19 +3204,20 @@ function renderReverseSuggestions(suggestions) {
       applyReverseSuggestion(suggestions[index], index);
     });
   });
-
-  reverseSuggestionsEl.querySelector("[data-export-selected-formula]")?.addEventListener("click", exportSelectedFormula);
 }
 
 function renderSuggestionCard(suggestion, index) {
   const isSelected = state.selectedReverseIndex === index;
   const mainDeviations = suggestion.deviations
-    .filter((item) => ["N", "P", "K", "Ca", "Mg", "S", "Cl"].includes(item.key))
+    .filter((item) => ["NO3-N", "NH4-N", "N", "P", "K", "Ca", "Mg", "S", "Cl"].includes(item.key))
     .slice(0, 7)
-    .map((item) => `<span class="${item.cls}">${item.key} ${formatDeviation(item.ratio)}</span>`)
+    .map((item) => `<span class="${item.cls}">${item.displayText || `${item.key} ${formatDeviation(item.ratio)}`}</span>`)
     .join(" · ");
   const phText = suggestion.phDeviation
     ? ` · <span class="${suggestion.phDeviation.cls}">pH ${suggestion.phDeviation.delta >= 0 ? "+" : ""}${suggestion.phDeviation.delta.toFixed(2)}</span>`
+    : "";
+  const phLimitText = suggestion.phLimit?.text
+    ? ` · <span class="${suggestion.phLimit.cls}">${suggestion.phLimit.text}</span>`
     : "";
 
   return `
@@ -2382,8 +3228,8 @@ function renderSuggestionCard(suggestion, index) {
       </h4>
       <div class="suggestion-meta">
         ${suggestion.note}<br>
-        EC ${formatNumber(suggestion.ec)} uS/cm · pH ${suggestion.pH.toFixed(2)} · 估算原料 ¥${formatCurrency(suggestion.estimatedCost)}<br>
-        ${mainDeviations || "目标偏差待计算"}${phText}
+        EC ${formatNumber(suggestion.ec)} uS/cm · pH ${suggestion.pH.toFixed(2)}（估算，受水温、CO2逸出速度等影响） · 估算原料 ¥${formatCurrency(suggestion.estimatedCost)}<br>
+        ${mainDeviations || "目标偏差待计算"}${phText}${phLimitText}
       </div>
       <div class="suggestion-buckets">
         ${renderSuggestionBucket("A", suggestion.bucketA)}
@@ -2392,29 +3238,6 @@ function renderSuggestionCard(suggestion, index) {
       <button class="${isSelected ? "btn-ghost" : "btn-a"}" type="button" data-apply-suggestion="${index}">
         ${isSelected ? "已采用，重新计算" : "采用方案"}
       </button>
-    </div>
-  `;
-}
-
-function renderSuggestionExportControls(suggestions) {
-  if (state.selectedReverseIndex == null || !suggestions[state.selectedReverseIndex]) return "";
-  return `
-    <div class="suggestion-export">
-      <label>
-        <span>AB肥配制量</span>
-        <select id="formulaExportVolume">
-          <option value="100">100 L</option>
-          <option value="1000">1000 L</option>
-        </select>
-      </label>
-      <label>
-        <span>导出格式</span>
-        <select id="formulaExportFormat">
-          <option value="xlsx">Excel</option>
-          <option value="pdf">PDF</option>
-        </select>
-      </label>
-      <button class="btn-a" type="button" data-export-selected-formula>导出配方</button>
     </div>
   `;
 }
@@ -2443,8 +3266,14 @@ function applyReverseSuggestion(suggestion, index = null) {
 
   renderBucket("A");
   renderBucket("B");
+  updateBucketGridVisibility();
+  positionModePanels();
 
   if (APP_MODE === 2) {
+    document.querySelectorAll("#bucketGrid .module-panel").forEach((panel) => {
+      setModuleCollapsed(panel, false);
+    });
+    setModuleCollapsed(document.getElementById("formulaExportPanel"), false);
     showMode2CalculationResult(true);
     renderCurrentCalculation();
     renderReverseSuggestions(state.reverseSuggestions);
@@ -2463,19 +3292,97 @@ function applyReverseSuggestion(suggestion, index = null) {
 
 function clearReverseSelection() {
   state.selectedReverseIndex = null;
+  updateBucketGridVisibility();
+  positionModePanels();
 }
 
 function showMode2CalculationResult(visible) {
-  ["kpiGrid", "tableWrap", "resultGrid"].forEach((id) => {
+  ["tableWrap", "resultGrid"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.style.display = visible ? "" : "none";
   });
 }
 
+function setModuleCollapsed(panel, collapsed) {
+  if (!panel) return;
+  panel.classList.toggle("is-collapsed", collapsed);
+  const toggle = panel.querySelector("[data-module-toggle]");
+  if (toggle) {
+    toggle.textContent = collapsed ? "展开" : "收起";
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+  }
+}
+
+function bindCollapsibleModules() {
+  document.querySelectorAll("[data-module-toggle]").forEach((button) => {
+    const panel = button.closest(".module-panel");
+    if (!panel) return;
+    button.setAttribute("aria-expanded", String(!panel.classList.contains("is-collapsed")));
+    button.addEventListener("click", () => {
+      setModuleCollapsed(panel, !panel.classList.contains("is-collapsed"));
+    });
+  });
+}
+
+function openModeModules(mode) {
+  document.querySelectorAll(".module-panel").forEach((panel) => {
+    setModuleCollapsed(panel, true);
+  });
+
+  const modeModules = mode === 1
+    ? ["waterSection", "importPanel", "resultsSection", "calibrationSection"]
+    : mode === 2
+      ? ["waterSection", "mode2TargetSection", "resultsSection"]
+      : [];
+
+  modeModules.forEach((id) => {
+    setModuleCollapsed(document.getElementById(id), false);
+  });
+
+  if (mode === 1) {
+    document.querySelectorAll("#bucketGrid .module-panel").forEach((panel) => {
+      setModuleCollapsed(panel, false);
+    });
+  } else if (mode === 2 && state.selectedReverseIndex != null) {
+    document.querySelectorAll("#bucketGrid .module-panel").forEach((panel) => {
+      setModuleCollapsed(panel, false);
+    });
+    setModuleCollapsed(document.getElementById("formulaExportPanel"), false);
+  }
+}
+
+function updateBucketGridVisibility() {
+  const bucketGrid = document.getElementById("bucketGrid");
+  const formulaExportPanel = document.getElementById("formulaExportPanel");
+  if (!bucketGrid) return;
+  const shouldShow = APP_MODE === 1 || (APP_MODE === 2 && state.selectedReverseIndex != null);
+  bucketGrid.style.display = shouldShow ? "" : "none";
+  if (formulaExportPanel) {
+    formulaExportPanel.style.display = APP_MODE === 2 && state.selectedReverseIndex != null ? "" : "none";
+  }
+}
+
+function positionModePanels() {
+  const bucketGrid = document.getElementById("bucketGrid");
+  const formulaExportPanel = document.getElementById("formulaExportPanel");
+  const mode2TargetSection = document.getElementById("mode2TargetSection");
+  const resultsSection = document.getElementById("resultsSection");
+  const reverseSuggestions = document.getElementById("reverseSuggestions");
+  const resultGrid = document.getElementById("resultGrid");
+  if (!bucketGrid || !formulaExportPanel || !mode2TargetSection || !resultsSection) return;
+
+  if (APP_MODE === 2) {
+    if (reverseSuggestions) reverseSuggestions.after(bucketGrid);
+    if (resultGrid) resultGrid.before(formulaExportPanel);
+  } else {
+    mode2TargetSection.before(bucketGrid);
+    bucketGrid.after(formulaExportPanel);
+  }
+}
+
 function clearMode2CalculationResult() {
   if (APP_MODE !== 2) return;
   showMode2CalculationResult(false);
-  if (kpiGrid) kpiGrid.innerHTML = "";
   if (irrigationBody) irrigationBody.innerHTML = "";
   if (elementTotalsGrid) elementTotalsGrid.innerHTML = "";
   if (precipList) precipList.innerHTML = "";
@@ -2520,16 +3427,18 @@ function setMode(mode) {
 
   show("waterSection",        anyMode);
   show("importPanel",         isMode1);
-  show("bucketGrid",          isMode1);
+  updateBucketGridVisibility();
+  positionModePanels();
   show("mode2TargetSection",  isMode2);
   show("resultsSection",      anyMode);
+  show("calibrationSection",  isMode1);
 
   show("resultsModeBar",   isMode1);
   show("targetDetails",    isMode1);
   show("inventoryDetails", isMode1);
-  show("kpiGrid",          isMode1);
   show("tableWrap",        isMode1);
   show("resultGrid",       isMode1);
+  openModeModules(mode);
 
   const heroText = document.querySelector("#heroText");
   if (heroText) {

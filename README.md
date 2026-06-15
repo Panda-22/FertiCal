@@ -85,6 +85,49 @@ http://127.0.0.1:8765
 
 Image OCR requires the Tesseract binary in addition to Python packages. See `backend/requirements.txt` for installation notes.
 
+### Server Deployment With PDF Support
+
+For a self-hosted server, keep the backend running all the time instead of trying to start `backend/start.sh` from the browser when a PDF is uploaded. The frontend cannot safely execute shell scripts. Use `systemd` to start the backend at boot and restart it if it exits, then proxy `/api/` to `127.0.0.1:8765`.
+
+Example `systemd` service:
+
+```ini
+[Unit]
+Description=FertiCal backend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/FertiCal/backend
+ExecStart=/bin/bash /var/www/FertiCal/backend/start.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable it after replacing `/var/www/FertiCal` with the real project path:
+
+```bash
+sudo cp deploy/fertical.service.example /etc/systemd/system/fertical.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now fertical
+sudo systemctl status fertical
+```
+
+Example Nginx location:
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8765/api/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
+
+With this setup, PDF uploads go directly to the live backend. If the backend is down, `systemd` brings it back automatically.
+
 ### GitHub Pages
 
 This repository includes `.github/workflows/pages.yml`. After pushing to `main`, GitHub Actions can publish the frontend files:
@@ -199,6 +242,49 @@ http://127.0.0.1:8765
 ```
 
 图片 OCR 除 Python 包外还需要安装 Tesseract 二进制程序，安装说明见 `backend/requirements.txt`。
+
+### 自有服务器部署与 PDF 支持
+
+部署到自己的服务器时，不建议等用户上传 PDF 后再由网页临时拉起 `backend/start.sh`。浏览器不能安全地执行服务器 shell 脚本；更稳的方式是让后端常驻运行，开机自启，异常退出后自动重启。然后用 Nginx 把 `/api/` 转发到 `127.0.0.1:8765`。
+
+示例 `systemd` 服务：
+
+```ini
+[Unit]
+Description=FertiCal backend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/FertiCal/backend
+ExecStart=/bin/bash /var/www/FertiCal/backend/start.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+把 `/var/www/FertiCal` 换成服务器上的真实项目路径后启用：
+
+```bash
+sudo cp deploy/fertical.service.example /etc/systemd/system/fertical.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now fertical
+sudo systemctl status fertical
+```
+
+Nginx 可增加：
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8765/api/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
+
+这样用户上传 PDF 时，请求会直接进入已经运行的后端；如果后端意外退出，`systemd` 会自动拉起。
 
 ### GitHub Pages 试发布
 

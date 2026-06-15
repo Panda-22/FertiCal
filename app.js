@@ -1510,6 +1510,11 @@ async function handleReportUpload(event) {
   const file = event.target.files?.[0];
   if (!file) return;
 
+  if (!(await ensureBackendReadyForPdf(file, reportStatus))) {
+    event.target.value = "";
+    return;
+  }
+
   reportStatus.textContent = `正在解析 ${file.name} ...`;
 
   try {
@@ -1564,6 +1569,11 @@ async function handleTargetUpload(event) {
   const statusEl = APP_MODE === 2
     ? (document.getElementById("mode2TargetStatus") ?? targetImportStatus)
     : targetImportStatus;
+  if (!(await ensureBackendReadyForPdf(file, statusEl))) {
+    event.target.value = "";
+    return;
+  }
+
   statusEl.textContent = `正在解析 ${file.name} ...`;
 
   try {
@@ -1606,6 +1616,11 @@ async function handleTargetUpload(event) {
 async function handleFormulaUpload(event) {
   const file = event.target.files?.[0];
   if (!file) return;
+
+  if (!(await ensureBackendReadyForPdf(file, formulaImportStatus))) {
+    event.target.value = "";
+    return;
+  }
 
   formulaImportStatus.textContent = `正在解析 ${file.name} ...`;
 
@@ -1665,6 +1680,26 @@ async function parseFormulaFile(file, buffer) {
 
 function isSpreadsheetFile(fileName) {
   return /\.(xlsx|xls|csv)$/i.test(fileName);
+}
+
+function isPdfFile(fileName) {
+  return /\.pdf$/i.test(fileName);
+}
+
+async function ensureBackendReadyForPdf(file, statusEl) {
+  if (!isPdfFile(file.name)) return true;
+  statusEl.textContent = `检测到 PDF：正在检查本地后台 ...`;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/ping`, { cache: "no-store" });
+    if (res.ok) return true;
+  } catch (error) {
+    console.info("Backend ping failed before PDF import", error);
+  }
+
+  statusEl.textContent =
+    `检测到 PDF，但后台服务暂时不可用。本地运行请先启动 backend/start.sh；服务器部署请检查 fertical systemd 服务和 /api 代理，然后重新上传 ${file.name}`;
+  return false;
 }
 
 function parseWorkbook(workbook) {
@@ -3800,9 +3835,16 @@ function clearMode2CalculationResult() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 本地数据库 API（对接 backend/main.py，http://127.0.0.1:8765）
+// 后端 API：本地直连 127.0.0.1:8765；服务器部署时建议由 Nginx 将 /api/ 反代到后端。
 // ═══════════════════════════════════════════════════════════════════
-const API_BASE = "http://127.0.0.1:8765";
+const API_BASE = (() => {
+  const host = window.location.hostname;
+  const isLocalPage = window.location.protocol === "file:" ||
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "";
+  return isLocalPage ? "http://127.0.0.1:8765" : "";
+})();
 
 async function apiFetch(path, options = {}) {
   const isFormData = options.body instanceof FormData;

@@ -203,18 +203,24 @@ def _to_float(value) -> Optional[float]:
 
 FERTILIZER_ALIASES = {
     "ca-no3-4h2o": ["硝酸钙", "四水硝酸钙", "Ca(NO3)2"],
-    "mg-no3-6h2o": ["硝酸镁", "六水硝酸镁", "Mg(NO3)2"],
+    "mg-no3-6h2o": ["硝酸镁", "六水硝酸镁", "硝酸镁六水合物", "Magnesium nitrate", "Mg(NO3)2", "Mg(NO3)2·6H2O", "11-0-0+16MgO"],
     "can": ["硝酸铵钙", "Calcium Ammonium Nitrate"],
     "cacl2": ["氯化钙", "CaCl2"],
     "kcl": ["氯化钾", "KCl"],
     "kno3": ["硝酸钾", "KNO3"],
-    "eddha-fe-11": ["EDDHA-Fe-11", "DTPA-Fe", "DTPAFe", "EDDHAFe", "EDDHA-Fe", "铁肥"],
+    "edta-fe-13": ["EDTA-铁", "EDTA铁", "螯合铁13", "铁13", "铁-13", "EDTA-Fe", "EDTAFe"],
+    "dtpa-fe-11": ["DTPA-铁", "DTPA铁", "螯合铁11", "铁11", "铁-11", "DTPA-Fe", "DTPAFe", "铁肥"],
+    "eddha-fe-6": ["EDDHA-铁", "EDDHA铁", "螯合铁6", "铁6", "铁-6", "EDDHA-Fe", "EDDHAFe", "EDDHA-Fe-11"],
+    "edta-mn-13": ["EDTA-锰", "EDTA锰", "螯合锰", "螯合猛", "锰螯合", "EDTA-Mn", "EDTAMn"],
+    "edta-zn-15": ["EDTA-锌", "EDTA锌", "螯合锌", "锌螯合", "EDTA-Zn", "EDTAZn"],
+    "edta-cu-15": ["EDTA-铜", "EDTA铜", "螯合铜", "铜螯合", "EDTA-Cu", "EDTACu"],
     "hno3-40": ["硝酸", "HNO3"],
     "kh2po4": ["磷酸二氢钾", "KH2PO4"],
     "mgso4-7h2o": ["七水硫酸镁", "五水硫酸镁", "硫酸镁", "MgSO4"],
     "k2so4": ["硫酸钾", "K2SO4"],
     "mnso4": ["硫酸锰", "MnSO4"],
-    "borax": ["硼砂", "Na2B4O7"],
+    "borax": ["硼砂", "十水硼砂", "Na2B4O7", "Na2B4O7·10H2O"],
+    "na-octaborate-4h2o": ["四水八硼", "四水八硼酸钠", "八硼酸钠", "Solubor", "速乐硼", "Na2B8O13", "Na2B8O13·4H2O"],
     "znso4": ["硫酸锌", "ZnSO4"],
     "cuso4": ["五水硫酸铜", "硫酸铜", "CuSO4"],
     "na2moo4": ["钼酸钠", "MoNa2O4", "Na2MoO4"],
@@ -518,10 +524,242 @@ parse_target_pdf_text = parse_target_text
 
 
 def parse_water_text(text: str) -> dict:
+    wide_row_values = parse_water_report_wide_source_rows(text)
+    if wide_row_values:
+        return _post_process_targets(wide_row_values)
+
+    table_values = parse_water_report_table_columns(text)
+    if table_values:
+        return _post_process_targets(table_values)
+
+    for candidate in iter_water_report_candidate_texts(text):
+        row_values = parse_water_report_rows(candidate)
+        if row_values:
+            return _post_process_targets(row_values)
+
     row_values = parse_water_report_rows(text)
     if row_values:
         return _post_process_targets(row_values)
     return parse_target_text(text)
+
+
+def split_report_row(line: str) -> list[str]:
+    text = str(line).strip()
+    if "\t" in line:
+        return [cell.strip() for cell in line.split("\t")]
+    cells = [cell.strip() for cell in re.split(r"[,;|，；]+", line)]
+    cells = [cell for cell in cells if cell]
+    if len(cells) > 1:
+        return cells
+    cells = [cell.strip() for cell in re.split(r"\s{2,}", text) if cell.strip()]
+    if len(cells) > 1:
+        return cells
+    loose_cells = [cell.strip() for cell in re.split(r"\s+", text) if cell.strip()]
+    if len(loose_cells) >= 3 and (
+        any(score_water_source_cell(cell) > 0 for cell in loose_cells)
+        or len(re.findall(r"-?\d+(?:[.．]\d+)?", text)) >= 2
+    ):
+        return loose_cells
+    return [text] if text else []
+
+
+def score_water_source_cell(cell: str) -> int:
+    compact = re.sub(r"\s+", "", str(cell))
+    lowered = compact.lower()
+    if not compact:
+        return 0
+    if re.search(r"出水|废水|污水|排水|回水|尾水|标准|限值|方法|单位|项目|指标|编号", compact):
+        return 0
+    score = 0
+    if "原水" in compact:
+        score += 8
+    if re.search(r"水样|样品|水质|灌溉水|井水|地下水|自来水|水源|取样", compact):
+        score += 4
+    if re.search(r"\bwater\b|rawwater|sourcewater", lowered):
+        score += 4
+    if compact == "水" or lowered == "water":
+        score += 1
+    return score
+
+
+def find_water_source_column(cells: list[str]) -> Optional[int]:
+    scored = [(score_water_source_cell(cell), index) for index, cell in enumerate(cells)]
+    scored = [item for item in scored if item[0] > 0]
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][1]
+
+
+def detect_water_report_header_key(cell: str) -> Optional[str]:
+    compact = re.sub(r"\s+", "", str(cell))
+    lowered = compact.lower()
+    if not compact:
+        return None
+    if re.search(r"%|k2o|cao|mgo|fe2o3|al2o3|na2o|含水率|有机|碳氮比", lowered):
+        return None
+    if re.search(r"n[-－]?no3|no3[-－]?n|硝", lowered):
+        return "NO3-N"
+    if re.search(r"n[-－]?nh4|nh4[-－]?n|铵|氨氮", lowered):
+        return "NH4-N"
+    if re.search(r"n[-－]?tn|总氮|全氮", lowered):
+        return "N"
+    if re.search(r"hco3|碳酸氢", lowered):
+        return "HCO3"
+    if re.search(r"(^|[^h])co3|碳酸根", lowered):
+        return "CO3"
+    if re.search(r"(^|[^a-z])ec(?:[^a-z]|$)|电导", lowered):
+        return "EC"
+    if re.search(r"\bph\b|酸碱", lowered):
+        return "pH"
+    if re.search(r"cl[-－]?|氯", lowered):
+        return "Cl"
+
+    cleaned = re.sub(r"(?:mg/l|mg/kg|mmol/l|μg/l|ug/l|µg/l|\(.+?\)|（.+?）)", "", lowered)
+    cleaned = re.sub(r"[^a-z]", "", cleaned)
+    return {
+        "b": "B", "ca": "Ca", "cu": "Cu", "fe": "Fe", "k": "K",
+        "mg": "Mg", "mn": "Mn", "mo": "Mo", "na": "Na", "p": "P",
+        "s": "S", "si": "Si", "zn": "Zn",
+    }.get(cleaned)
+
+
+def row_has_water_source(cells: list[str]) -> bool:
+    return any(score_water_source_cell(cell) >= 4 for cell in cells)
+
+
+def parse_water_report_wide_source_rows(text: str) -> dict:
+    values: dict[str, float] = {}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    for index, line in enumerate(lines):
+        header_cells = split_report_row(line)
+        header_keys = [detect_water_report_header_key(cell) for cell in header_cells]
+        if sum(1 for key in header_keys if key) < 5:
+            continue
+
+        for row in lines[index + 1:index + 120]:
+            row_cells = split_report_row(row)
+            if not row_has_water_source(row_cells):
+                continue
+
+            for position, key in enumerate(header_keys):
+                if not key or key in values or position >= len(row_cells):
+                    continue
+                value = parse_float_from_cell(row_cells[position])
+                if value is None:
+                    continue
+                values[key] = normalize_water_cell_value(value, header_cells[position], key)
+            if values:
+                return values
+
+    return values
+
+
+def is_report_descriptor_header(cell: str) -> bool:
+    compact = re.sub(r"\s+", "", str(cell))
+    return bool(re.search(r"序号|编号|项目|指标|名称|参数|单位|方法|检测结果|检验结果", compact))
+
+
+def water_result_ordinal(header_cells: list[str], source_col: int) -> int:
+    ordinal = 0
+    for cell in header_cells[:source_col]:
+        if cell and not is_report_descriptor_header(cell):
+            ordinal += 1
+    return ordinal
+
+
+def parse_float_from_cell(cell: str) -> Optional[float]:
+    match = re.search(r"<?\s*-?\d+(?:[.．]\s*\d+)?(?:[eE][+-]?\d+)?", str(cell))
+    if not match:
+        return None
+    raw = re.sub(r"\s+", "", match.group()).replace("．", ".").lstrip("<")
+    return _to_float(raw)
+
+
+def extract_indexed_report_number(line: str, ordinal: int) -> Optional[float]:
+    numeric_tokens: list[float] = []
+    row_no_match = re.match(r"^\s*(\d{1,2})\b", line)
+    row_no_end = row_no_match.end() if row_no_match else 0
+
+    for match in re.finditer(r"<?-?\d+(?:[.．]\s*\d+)?(?:[eE][+-]?\d+)?", line):
+        if match.start() < row_no_end:
+            continue
+        if match.start() > 0 and str(line)[match.start() - 1].isalpha():
+            continue
+        raw = match.group().replace("．", ".").lstrip("<")
+        value = _to_float(raw)
+        if value is not None:
+            numeric_tokens.append(value)
+
+    if ordinal < len(numeric_tokens):
+        return numeric_tokens[ordinal]
+    return None
+
+
+def normalize_water_cell_value(value: float, row_text: str, key: str) -> float:
+    if key == "EC":
+        return value * 1000 if value < 20 else value
+    if key in {"Cu", "Fe", "Mn", "Zn", "B", "Mo", "Si"} and re.search(r"μg|ug|µg", row_text, re.I):
+        return value / 1000
+    return value
+
+
+def parse_water_report_table_columns(text: str) -> dict:
+    values: dict[str, float] = {}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    for index, line in enumerate(lines):
+        header_cells = split_report_row(line)
+        if len(header_cells) < 2:
+            continue
+
+        source_col = find_water_source_column(header_cells)
+        if source_col is None:
+            continue
+        source_ordinal = water_result_ordinal(header_cells, source_col)
+
+        for row in lines[index + 1:index + 40]:
+            row_cells = split_report_row(row)
+
+            row_text = "\t".join(row_cells)
+            key = detect_water_report_key(row_text)
+            if not key or key in values:
+                continue
+
+            value = parse_float_from_cell(row_cells[source_col]) if source_col < len(row_cells) else None
+            if value is None:
+                value = extract_indexed_report_number(row_text, source_ordinal)
+            if value is None:
+                continue
+
+            values[key] = normalize_water_cell_value(value, row_text, key)
+
+    return values
+
+
+def is_water_report_context_line(line: str) -> bool:
+    compact = re.sub(r"\s+", "", str(line))
+    lowered = compact.lower()
+    if re.search(r"原水|水样|水质|灌溉水|井水|地下水|自来水|水源|取样", compact):
+        return True
+    return bool(re.search(r"rawwater|sourcewater|waterquality|watersample", lowered))
+
+
+def iter_water_report_candidate_texts(text: str):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    seen: set[tuple[int, int]] = set()
+
+    for index, line in enumerate(lines):
+        if not is_water_report_context_line(line):
+            continue
+        start = index
+        end = min(len(lines), index + 40)
+        key = (start, end)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield "\n".join(lines[start:end])
 
 
 def parse_water_report_rows(text: str) -> dict:
@@ -689,7 +927,7 @@ def parse_formula_list_without_bucket_order(lines: list[str], base: dict) -> dic
             "unit": "kg"
         })
 
-    split_index = next((i for i, row in enumerate(formula_rows) if row["fertilizerId"] in {"kh2po4", "mgso4-7h2o", "k2so4", "mnso4", "borax", "znso4", "cuso4", "na2moo4"}), None)
+    split_index = next((i for i, row in enumerate(formula_rows) if row["fertilizerId"] in {"kh2po4", "mgso4-7h2o", "k2so4", "mnso4", "borax", "na-octaborate-4h2o", "znso4", "cuso4", "na2moo4"}), None)
     if split_index is None:
         split_index = len(formula_rows)
 

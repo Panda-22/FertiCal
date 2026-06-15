@@ -89,6 +89,8 @@ const WORKING_SOLUTION_CO2_RELEASE_FACTOR = 0.7;
 const TARGET_RESIDUAL_HCO3_MMOL = 0.75;
 const ACID_PREFEED_MIN_MMOL = 0.02;
 const NITRIC_ACID_REGULATORY_PENALTY_PER_KG = 0.35;
+const P_TO_P2O5_FACTOR = (2 * MOLAR_MASS.P + 5 * 15.999) / (2 * MOLAR_MASS.P);
+const K_TO_K2O_FACTOR = (2 * MOLAR_MASS.K + 15.999) / (2 * MOLAR_MASS.K);
 
 function calculateEC(totalMmol) {
   let ec = 0;
@@ -375,14 +377,15 @@ const PRECIPITATION_SYSTEMS = [
     note: "25°C gypsum"
   },
   {
-    salt: "Ca3(PO4)2",
+    salt: "CaHPO4·2H2O",
     counterKey: "P",
-    counterLabel: "PO4",
-    ksp: 2.07e-33,
-    equation: "[Ca2+]^3 x [PO4^3-]^2",
-    ionProduct: "3:2",
-    unit: "(mol/L)^5",
-    note: "25°C"
+    counterLabel: "HPO4",
+    counterSpecies: "hpo4",
+    ksp: 2.56e-7,
+    equation: "[Ca2+] x [HPO4^2-]",
+    ionProduct: "1:1",
+    unit: "(mol/L)^2",
+    note: "25°C CaHPO4·2H2O (DCPD)"
   }
 ];
 
@@ -400,8 +403,8 @@ const FERTILIZER_CATALOG = [
   {
     id: "mg-no3-6h2o",
     name: "硝酸镁（六水合）",
-    bucket: "A",
-    notes: "Mg(NO3)2·6H2O",
+    bucket: "AB",
+    notes: "Mg(NO3)2·6H2O · 11-0-0+15.7MgO",
     compounds: [
       { label: "NO3-N", percent: 10.92, element: "NO3-N" },
       { label: "Mg", percent: 9.48, element: "Mg" }
@@ -449,11 +452,46 @@ const FERTILIZER_CATALOG = [
     ]
   },
   {
-    id: "eddha-fe-11",
-    name: "EDDHA-Fe-11",
+    id: "edta-fe-13",
+    name: "EDTA-铁（13%Fe）",
     bucket: "A",
-    notes: "Fe 11%",
+    notes: "EDTA-Fe 13% · pH 4.0-6.5",
+    compounds: [{ label: "Fe", percent: 13, element: "Fe" }]
+  },
+  {
+    id: "dtpa-fe-11",
+    name: "DTPA-铁（11%Fe）",
+    bucket: "A",
+    notes: "DTPA-Fe 11% · pH 4.0-7.5",
     compounds: [{ label: "Fe", percent: 11, element: "Fe" }]
+  },
+  {
+    id: "eddha-fe-6",
+    name: "EDDHA-铁（6%Fe）",
+    bucket: "A",
+    notes: "EDDHA-Fe 6% · pH 4.0-9.0",
+    compounds: [{ label: "Fe", percent: 6, element: "Fe" }]
+  },
+  {
+    id: "edta-mn-13",
+    name: "EDTA-锰（13%Mn）",
+    bucket: "AB",
+    notes: "EDTA-Mn 13%",
+    compounds: [{ label: "Mn", percent: 13, element: "Mn" }]
+  },
+  {
+    id: "edta-zn-15",
+    name: "EDTA-锌（15%Zn）",
+    bucket: "AB",
+    notes: "EDTA-Zn 15%",
+    compounds: [{ label: "Zn", percent: 15, element: "Zn" }]
+  },
+  {
+    id: "edta-cu-15",
+    name: "EDTA-铜（15%Cu）",
+    bucket: "AB",
+    notes: "EDTA-Cu 15%",
+    compounds: [{ label: "Cu", percent: 15, element: "Cu" }]
   },
   {
     id: "hno3-40",
@@ -515,6 +553,16 @@ const FERTILIZER_CATALOG = [
     ]
   },
   {
+    id: "na-octaborate-4h2o",
+    name: "四水八硼（20.5%B）",
+    bucket: "AB",
+    notes: "Na2B8O13·4H2O",
+    compounds: [
+      { label: "B", percent: 20.5, element: "B" },
+      { label: "Na", percent: 10.9, element: "Na" }
+    ]
+  },
+  {
     id: "znso4",
     name: "硫酸锌（23%Zn）",
     bucket: "B",
@@ -562,13 +610,19 @@ const TEST_FERTILIZER_PRICES = {
   cacl2: 1.7,
   kcl: 2.4,
   kno3: 6.8,
-  "eddha-fe-11": 78,
+  "edta-fe-13": 34,
+  "dtpa-fe-11": 48,
+  "eddha-fe-6": 82,
+  "edta-mn-13": 42,
+  "edta-zn-15": 38,
+  "edta-cu-15": 48,
   "hno3-40": 2.2,
   kh2po4: 8.5,
   "mgso4-7h2o": 1.9,
   k2so4: 4.2,
   mnso4: 12,
   borax: 5.1,
+  "na-octaborate-4h2o": 9.2,
   znso4: 9.4,
   cuso4: 18,
   na2moo4: 96,
@@ -579,6 +633,23 @@ const DEFAULT_FERTILIZER_PRICE = 10;
 const AVERAGE_TEST_FERTILIZER_PRICE =
   Object.values(TEST_FERTILIZER_PRICES).reduce((sum, price) => sum + price, 0) /
   Object.values(TEST_FERTILIZER_PRICES).length;
+const CHELATED_TRACE_PREFERRED_IDS = {
+  Mn: "edta-mn-13",
+  Zn: "edta-zn-15",
+  Cu: "edta-cu-15"
+};
+const TRACE_SULFATE_FALLBACK_IDS = {
+  Mn: "mnso4",
+  Zn: "znso4",
+  Cu: "cuso4"
+};
+const PREFERRED_BORON_FERTILIZER_ID = "na-octaborate-4h2o";
+const BORAX_FALLBACK_ID = "borax";
+const IRON_CHELATE_OPTIONS = [
+  { id: "edta-fe-13", minPH: 4.0, maxPH: 6.5, fallbackOrder: 1 },
+  { id: "dtpa-fe-11", minPH: 4.0, maxPH: 7.5, fallbackOrder: 2 },
+  { id: "eddha-fe-6", minPH: 4.0, maxPH: 9.0, fallbackOrder: 3 }
+];
 
 const DETECTION_RULES = [
   { key: "NO3-N", matchers: [/no3/i, /硝态氮/, /硝酸盐/, /硝氮/] },
@@ -661,6 +732,13 @@ const state = {
   lastWaterSource: "",
   lastFormulaSource: "",
   phCalibration: null,
+  reversePreferences: {
+    ironStrategy: "adaptive",
+    traceChelate: "prefer",
+    costPriority: "balanced",
+    nitricAcid: "avoid",
+    phosphoricAcid: "allow"
+  },
   bucketA: [],
   bucketB: []
 };
@@ -694,6 +772,13 @@ const titrationNotesInput = document.querySelector("#titrationNotes");
 const saveTitrationBtn = document.querySelector("#saveTitration");
 const calibrationStatus = document.querySelector("#calibrationStatus");
 const calibrationReadout = document.querySelector("#calibrationReadout");
+const preferenceInputs = {
+  ironStrategy: document.querySelector("#prefIronStrategy"),
+  traceChelate: document.querySelector("#prefTraceChelate"),
+  costPriority: document.querySelector("#prefCostPriority"),
+  nitricAcid: document.querySelector("#prefNitricAcid"),
+  phosphoricAcid: document.querySelector("#prefPhosphoricAcid")
+};
 
 init();
 
@@ -735,6 +820,7 @@ function bindStaticEvents() {
   targetFile?.addEventListener("change", handleTargetUpload);
   formulaFile?.addEventListener("change", handleFormulaUpload);
   saveTitrationBtn?.addEventListener("click", saveCurrentTitration);
+  bindReversePreferenceInputs();
 
   // 同步 DOM 初始值（浏览器可能记住了上次的选择）
   CALC_MODE = document.querySelector("#calcMode")?.value ?? "forward";
@@ -764,6 +850,18 @@ function bindStaticEvents() {
 
   document.querySelector("#exportResults")?.addEventListener("click", exportResults);
   document.querySelector("#exportSelectedFormula")?.addEventListener("click", exportSelectedFormula);
+}
+
+function bindReversePreferenceInputs() {
+  Object.entries(preferenceInputs).forEach(([key, input]) => {
+    if (!input) return;
+    state.reversePreferences[key] = input.value || state.reversePreferences[key];
+    input.addEventListener("change", (event) => {
+      state.reversePreferences[key] = event.target.value;
+      clearReverseSelection();
+      if (APP_MODE === 2) calculateReverse();
+    });
+  });
 }
 
 function buildRow(bucket) {
@@ -1144,7 +1242,8 @@ function renderElementTotals(bucketAResult, bucketBResult) {
     return;
   }
 
-  elementTotalsGrid.innerHTML = buckets.map((bucket) => `
+  const grade = calculateNpkOxideGrade(bucketAResult, bucketBResult);
+  const bucketHtml = buckets.map((bucket) => `
     <div class="bucket-mol-card ${bucket.cls}">
       <h4>${bucket.name}</h4>
       ${keys.map((key) => `
@@ -1155,10 +1254,58 @@ function renderElementTotals(bucketAResult, bucketBResult) {
       `).join("")}
     </div>
   `).join("");
+
+  const gradeHtml = grade
+    ? `
+      <div class="bucket-mol-card npk-grade">
+        <h4>A+B 合计 N-P2O5-K2O</h4>
+        <div class="npk-grade-value">${formatNpkGradeValue(grade)}</div>
+        <div class="grams-row">
+          <span><b>N</b></span>
+          <span class="vals">${formatNumber(grade.n)} kg / 100kg肥</span>
+        </div>
+        <div class="grams-row">
+          <span><b>P2O5</b></span>
+          <span class="vals">${formatNumber(grade.p2o5)} kg / 100kg肥</span>
+        </div>
+        <div class="grams-row">
+          <span><b>K2O</b></span>
+          <span class="vals">${formatNumber(grade.k2o)} kg / 100kg肥</span>
+        </div>
+      </div>
+    `
+    : "";
+
+  elementTotalsGrid.innerHTML = bucketHtml + gradeHtml;
 }
 
 function molPer100LStock(bucketResult, key) {
   return (bucketResult.perLiterMmol[key] ?? 0) * 0.1;
+}
+
+function calculateNpkOxideGrade(bucketAResult, bucketBResult) {
+  const totalFertilizerGrams =
+    (bucketAResult.totalFertilizerGrams ?? 0) +
+    (bucketBResult.totalFertilizerGrams ?? 0);
+  if (!Number.isFinite(totalFertilizerGrams) || totalFertilizerGrams <= 0) {
+    return null;
+  }
+
+  const combinedTotals = {
+    N: (bucketAResult.totals.N ?? 0) + (bucketBResult.totals.N ?? 0),
+    P: (bucketAResult.totals.P ?? 0) + (bucketBResult.totals.P ?? 0),
+    K: (bucketAResult.totals.K ?? 0) + (bucketBResult.totals.K ?? 0)
+  };
+
+  return {
+    n: combinedTotals.N / totalFertilizerGrams * 100,
+    p2o5: combinedTotals.P * P_TO_P2O5_FACTOR / totalFertilizerGrams * 100,
+    k2o: combinedTotals.K * K_TO_K2O_FACTOR / totalFertilizerGrams * 100
+  };
+}
+
+function formatNpkGradeValue(grade) {
+  return [grade.n, grade.p2o5, grade.k2o].map((value) => formatNumber(value)).join("-");
 }
 
 function buildTotalMmol(bucketAResult, bucketBResult) {
@@ -1310,7 +1457,7 @@ function buildPrecipitationRows(bucketName, bucketResult) {
     let counterMol = 0;
     if (system.counterKey === "P") {
       const phosphate = phosphateFractions(stockPH);
-      counterMol = mmolToMol(stockMmol.P ?? 0) * phosphate.po4;
+      counterMol = mmolToMol(stockMmol.P ?? 0) * phosphate[system.counterSpecies ?? "po4"];
     } else if (system.counterKey === "S") {
       const sulfate = sulfateFractions(stockPH);
       counterMol = mmolToMol(stockMmol.S ?? 0) * sulfate.so4;
@@ -1526,6 +1673,12 @@ function parseWorkbook(workbook) {
   workbook.SheetNames.forEach((sheetName) => {
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
+    const sourceWater = parseSourceWaterRows(rows);
+    if (sourceWater.hits.size > best.hitCount) {
+      best = { values: sourceWater.values, hitCount: sourceWater.hits.size, sheetName };
+      return;
+    }
+
     const wide = parseWideRows(rows);
     const long = parseLongRows(rows);
     const parsed = mergeElementMaps(wide.values, long.values);
@@ -1645,18 +1798,24 @@ function findFertilizerByName(source, bucket) {
 function getFertilizerAliases(item) {
   const aliases = {
     "ca-no3-4h2o": ["硝酸钙", "四水硝酸钙", "Ca(NO3)2"],
-    "mg-no3-6h2o": ["硝酸镁", "六水硝酸镁", "Mg(NO3)2"],
+    "mg-no3-6h2o": ["硝酸镁", "六水硝酸镁", "硝酸镁六水合物", "Magnesium nitrate", "Mg(NO3)2", "Mg(NO3)2·6H2O", "11-0-0+16MgO"],
     can: ["硝酸铵钙", "CAN"],
     cacl2: ["氯化钙", "CaCl2"],
     kcl: ["氯化钾", "KCl"],
     kno3: ["硝酸钾", "KNO3"],
-    "eddha-fe-11": ["EDDHAFe", "EDDHA-Fe", "铁肥"],
+    "edta-fe-13": ["EDTA-铁", "EDTA铁", "螯合铁13", "铁13", "铁-13", "EDTA-Fe", "EDTAFe"],
+    "dtpa-fe-11": ["DTPA-铁", "DTPA铁", "螯合铁11", "铁11", "铁-11", "DTPA-Fe", "DTPAFe", "铁肥"],
+    "eddha-fe-6": ["EDDHA-铁", "EDDHA铁", "螯合铁6", "铁6", "铁-6", "EDDHA-Fe", "EDDHAFe", "EDDHA-Fe-11"],
+    "edta-mn-13": ["EDTA-锰", "EDTA锰", "螯合锰", "螯合猛", "锰螯合", "EDTA-Mn", "EDTAMn"],
+    "edta-zn-15": ["EDTA-锌", "EDTA锌", "螯合锌", "锌螯合", "EDTA-Zn", "EDTAZn"],
+    "edta-cu-15": ["EDTA-铜", "EDTA铜", "螯合铜", "铜螯合", "EDTA-Cu", "EDTACu"],
     "hno3-40": ["硝酸", "HNO3"],
     kh2po4: ["磷酸二氢钾", "KH2PO4"],
     "mgso4-7h2o": ["七水硫酸镁", "五水硫酸镁", "硫酸镁", "MgSO4"],
     k2so4: ["硫酸钾", "K2SO4"],
     mnso4: ["硫酸锰", "MnSO4"],
-    borax: ["硼砂", "四水八硼", "Na2B4O7"],
+    borax: ["硼砂", "十水硼砂", "Na2B4O7", "Na2B4O7·10H2O"],
+    "na-octaborate-4h2o": ["四水八硼", "四水八硼酸钠", "八硼酸钠", "Solubor", "速乐硼", "Na2B8O13", "Na2B8O13·4H2O"],
     znso4: ["硫酸锌", "ZnSO4"],
     cuso4: ["五水硫酸铜", "硫酸铜", "CuSO4"],
     na2moo4: ["钼酸钠", "MoNa2O4", "Na2MoO4"],
@@ -1691,6 +1850,79 @@ function parseWideRows(rows) {
   });
 
   return { values: result, hits };
+}
+
+function parseSourceWaterRows(rows) {
+  const result = emptyElementMap();
+  const hits = new Set();
+
+  rows.forEach((headerRow, headerIndex) => {
+    if (hits.size > 0 || !Array.isArray(headerRow)) return;
+    const headerKeys = headerRow.map(detectWaterReportHeaderKey);
+    if (headerKeys.filter(Boolean).length < 5) return;
+
+    const sourceRow = rows
+      .slice(headerIndex + 1, headerIndex + 121)
+      .find((row) => Array.isArray(row) && row.some(isSourceWaterCell));
+    if (!sourceRow) return;
+
+    headerKeys.forEach((elementKey, index) => {
+      if (!elementKey || hits.has(elementKey) || index >= sourceRow.length) return;
+      const parsedValue = convertValue(elementKey, sourceRow[index], String(headerRow[index] ?? ""));
+      if (Number.isFinite(parsedValue)) {
+        result[elementKey] = parsedValue;
+        hits.add(elementKey);
+      }
+    });
+  });
+
+  return { values: result, hits };
+}
+
+function isSourceWaterCell(cell) {
+  const text = String(cell ?? "").replace(/\s+/g, "");
+  if (!text) return false;
+  if (/出水|废水|污水|排水|回水|尾水|进液|回液|标准|限值|方法|单位|项目|指标|编号/.test(text)) {
+    return false;
+  }
+  return /原水|水样|水质|灌溉水|井水|地下水|自来水|水源|取样/i.test(text)
+    || /rawwater|sourcewater|waterquality|watersample/i.test(text);
+}
+
+function detectWaterReportHeaderKey(cell) {
+  const text = String(cell ?? "").replace(/\s+/g, "");
+  const lower = text.toLowerCase();
+  if (!text) return null;
+  if (/%|k2o|cao|mgo|fe2o3|al2o3|na2o|含水率|有机|碳氮比/i.test(lower)) {
+    return null;
+  }
+  if (/n[-－]?no3|no3[-－]?n|硝/i.test(lower)) return "NO3-N";
+  if (/n[-－]?nh4|nh4[-－]?n|铵|氨氮/i.test(lower)) return "NH4-N";
+  if (/n[-－]?tn|总氮|全氮/i.test(lower)) return "N";
+  if (/hco3|碳酸氢/i.test(lower)) return "HCO3";
+  if (/(^|[^h])co3|碳酸根/i.test(lower)) return "CO3";
+  if (/(^|[^a-z])ec(?:[^a-z]|$)|电导/i.test(lower)) return "EC";
+  if (/\bph\b|酸碱/i.test(lower)) return "pH";
+  if (/cl[-－]?|氯/i.test(lower)) return "Cl";
+
+  const cleaned = lower
+    .replace(/(?:mg\/l|mg\/kg|mmol\/l|μg\/l|ug\/l|µg\/l|\(.+?\)|（.+?）)/g, "")
+    .replace(/[^a-z]/g, "");
+  return {
+    b: "B",
+    ca: "Ca",
+    cu: "Cu",
+    fe: "Fe",
+    k: "K",
+    mg: "Mg",
+    mn: "Mn",
+    mo: "Mo",
+    na: "Na",
+    p: "P",
+    s: "S",
+    si: "Si",
+    zn: "Zn"
+  }[cleaned] ?? null;
 }
 
 function parseLongRows(rows) {
@@ -2063,12 +2295,19 @@ function exportResults() {
   }
 
   const header = Array.from(document.querySelectorAll("thead th")).map((th) => th.textContent.trim());
+  const npkGrade = latestCalculation
+    ? calculateNpkOxideGrade(latestCalculation.bucketAResult, latestCalculation.bucketBResult)
+    : null;
   const summary = [
     ["导出时间", new Date().toLocaleString("zh-CN")],
     ["A 桶体积 L", document.querySelector("#aTankVolume")?.value || ""],
     ["A 桶稀释倍数", document.querySelector("#aDilution")?.value || ""],
     ["B 桶体积 L", document.querySelector("#bTankVolume")?.value || ""],
     ["B 桶稀释倍数", document.querySelector("#bDilution")?.value || ""],
+    ["A+B 每100kg肥 N-P2O5-K2O", npkGrade ? formatNpkGradeValue(npkGrade) : ""],
+    ["N kg/100kg肥", npkGrade ? Number(npkGrade.n.toFixed(4)) : ""],
+    ["P2O5 kg/100kg肥", npkGrade ? Number(npkGrade.p2o5.toFixed(4)) : ""],
+    ["K2O kg/100kg肥", npkGrade ? Number(npkGrade.k2o.toFixed(4)) : ""],
     []
   ];
   const data = [...summary, header, ...rows];
@@ -2349,11 +2588,7 @@ function calculateReverse() {
 }
 
 function generateReverseSuggestions() {
-  const profiles = [
-    { id: "fit", name: "目标贴合优先", note: "尽量贴近主要目标元素", exclude: [], rowPenalty: 0.0005 },
-    { id: "low-cl-s", name: "低氯低硫优先", note: "优先避开氯化盐，允许用硫酸镁补足镁", exclude: ["cacl2", "kcl", "k2so4"], rowPenalty: 0.0005 },
-    { id: "low-cost", name: "原料成本最低", note: "按测试单价优先选择低成本组合", exclude: [], rowPenalty: 0.0004, costPenalty: 0.0018 }
-  ];
+  const profiles = buildReverseProfiles();
 
   const suggestions = profiles
     .map((profile) => buildReverseSuggestion(profile))
@@ -2373,6 +2608,76 @@ function generateReverseSuggestions() {
   });
 
   return unique.sort((a, b) => a.score - b.score).slice(0, 3);
+}
+
+function buildReverseProfiles() {
+  const preferences = state.reversePreferences;
+  const common = {
+    exclude: getPreferenceExcludedFertilizers(preferences),
+    acidPenalty: getPreferenceAcidPenalty(preferences),
+    tracePreference: preferences.traceChelate,
+    ironStrategy: preferences.ironStrategy,
+    phFloor: preferences.ironStrategy === "high-ph" ? 6.5 : null
+  };
+  const costMultiplier = preferences.costPriority === "low"
+    ? 1.8
+    : preferences.costPriority === "quality" ? 0.45 : 1;
+  const rowPenaltyMultiplier = preferences.costPriority === "quality" ? 1.15 : 1;
+
+  return [
+    {
+      ...common,
+      id: "fit",
+      name: "目标贴合优先",
+      note: buildPreferenceNote("尽量贴近主要目标元素", preferences),
+      rowPenalty: 0.0005 * rowPenaltyMultiplier
+    },
+    {
+      ...common,
+      id: "low-cl-s",
+      name: "低氯低硫优先",
+      note: buildPreferenceNote("优先避开氯化盐和硫酸钾", preferences),
+      exclude: [...common.exclude, "cacl2", "kcl", "k2so4"],
+      rowPenalty: 0.0005 * rowPenaltyMultiplier
+    },
+    {
+      ...common,
+      id: "low-cost",
+      name: "原料成本最低",
+      note: buildPreferenceNote("按测试单价优先选择低成本组合", preferences),
+      rowPenalty: 0.0004,
+      costPenalty: 0.0018 * costMultiplier
+    }
+  ];
+}
+
+function getPreferenceExcludedFertilizers(preferences) {
+  const exclude = [];
+  if (preferences.nitricAcid === "unavailable") exclude.push("hno3-40");
+  if (preferences.phosphoricAcid === "unavailable") exclude.push("h3po4-85");
+  return exclude;
+}
+
+function getPreferenceAcidPenalty(preferences) {
+  return {
+    nitric: preferences.nitricAcid === "avoid" ? 1.2 : 0,
+    phosphoric: preferences.phosphoricAcid === "avoid" ? 0.45 : 0
+  };
+}
+
+function buildPreferenceNote(base, preferences) {
+  const parts = [base];
+  if (preferences.traceChelate === "prefer") parts.push("微量元素优先螯合态");
+  if (preferences.ironStrategy === "high-ph") {
+    parts.push("铁源优先铁-6并尽量保留 pH ≥ 6.5");
+  } else {
+    parts.push("铁源按 pH 选择铁-13/铁-11/铁-6");
+  }
+  if (preferences.nitricAcid === "avoid") parts.push("尽量不用硝酸");
+  if (preferences.nitricAcid === "unavailable") parts.push("不使用硝酸");
+  if (preferences.phosphoricAcid === "avoid") parts.push("尽量不用磷酸");
+  if (preferences.phosphoricAcid === "unavailable") parts.push("不使用磷酸");
+  return parts.join("，");
 }
 
 function buildReverseSuggestion(profile) {
@@ -2405,14 +2710,14 @@ function buildReverseSuggestionWithAcidPlan(profile, acidPlan) {
     return null;
   }
 
-  const variables = [
+  const variables = prioritizeReverseFertilizerVariables([
     ...getCatalogByBucket("A").map((fertilizer) => ({ fertilizer, bucket: "A" })),
     ...getCatalogByBucket("B").map((fertilizer) => ({ fertilizer, bucket: "B" }))
   ].filter((variable) =>
     state.inventory[variable.fertilizer.id] &&
     !profile.exclude.includes(variable.fertilizer.id) &&
     !isAcidFertilizer(variable.fertilizer)
-  );
+  ), profile);
 
   const matrix = activeTargets.map((target) =>
     variables.map((variable) => contributionPerKg(variable, target.key, { aTank, aDilution, bTank, bDilution }) * target.weight)
@@ -2653,6 +2958,101 @@ function contributionPerKg(variable, key, config) {
   return mmol;
 }
 
+function prioritizeReverseFertilizerVariables(variables, profile) {
+  const availableIds = new Set(variables.map((variable) => variable.fertilizer.id));
+  const preferredIronId = selectPreferredIronChelateId(availableIds, getReverseDesignPH(profile), profile);
+
+  return variables.filter((variable) => {
+    const fertilizerId = variable.fertilizer.id;
+    if (isIronChelate(fertilizerId)) {
+      return fertilizerId === preferredIronId;
+    }
+
+    const traceElement = getTraceSulfateElement(fertilizerId);
+    if (traceElement && profile.tracePreference !== "any") {
+      const preferredId = CHELATED_TRACE_PREFERRED_IDS[traceElement];
+      return !availableIds.has(preferredId);
+    }
+
+    if (
+      profile.tracePreference !== "any" &&
+      fertilizerId === BORAX_FALLBACK_ID &&
+      availableIds.has(PREFERRED_BORON_FERTILIZER_ID)
+    ) {
+      return false;
+    }
+
+    if (isPreferredChelatedTrace(fertilizerId) && variable.bucket === "A") {
+      return !variables.some((item) =>
+        item.bucket === "B" &&
+        item.fertilizer.id === fertilizerId
+      );
+    }
+
+    return true;
+  });
+}
+
+function getReverseDesignPH(profile = null) {
+  const targetPH = state.targets.pH;
+  if (typeof targetPH === "number" && Number.isFinite(targetPH) && targetPH > 0) {
+    return profile?.phFloor ? Math.max(targetPH, profile.phFloor) : targetPH;
+  }
+  const waterPH = state.water.pH;
+  if (typeof waterPH === "number" && Number.isFinite(waterPH) && waterPH > 0) {
+    return profile?.phFloor ? Math.max(waterPH, profile.phFloor) : waterPH;
+  }
+  return profile?.phFloor ? Math.max(DEFAULT_TARGET_PH, profile.phFloor) : DEFAULT_TARGET_PH;
+}
+
+function getEffectivePHTarget(profile = null) {
+  const targetPH = state.targets.pH;
+  if (!(typeof targetPH === "number" && Number.isFinite(targetPH) && targetPH > 0)) {
+    return null;
+  }
+  return profile?.phFloor ? Math.max(targetPH, profile.phFloor) : targetPH;
+}
+
+function selectPreferredIronChelateId(availableIds, pH, profile = null) {
+  const availableOptions = IRON_CHELATE_OPTIONS.filter((option) => availableIds.has(option.id));
+  if (!availableOptions.length) return null;
+
+  if (profile?.ironStrategy === "high-ph" && availableIds.has("eddha-fe-6")) {
+    return "eddha-fe-6";
+  }
+
+  const inRange = availableOptions.filter((option) => pH >= option.minPH && pH <= option.maxPH);
+  if (inRange.length) {
+    if (pH <= 6.5) {
+      return findFirstAvailableIronId(inRange, ["edta-fe-13", "dtpa-fe-11", "eddha-fe-6"]);
+    }
+    if (pH <= 7.5) {
+      return findFirstAvailableIronId(inRange, ["dtpa-fe-11", "eddha-fe-6", "edta-fe-13"]);
+    }
+    return findFirstAvailableIronId(inRange, ["eddha-fe-6", "dtpa-fe-11", "edta-fe-13"]);
+  }
+
+  return findFirstAvailableIronId(availableOptions, ["eddha-fe-6", "dtpa-fe-11", "edta-fe-13"]);
+}
+
+function findFirstAvailableIronId(options, orderedIds) {
+  const optionIds = new Set(options.map((option) => option.id));
+  return orderedIds.find((id) => optionIds.has(id)) ?? options[0]?.id ?? null;
+}
+
+function isIronChelate(fertilizerId) {
+  return IRON_CHELATE_OPTIONS.some((option) => option.id === fertilizerId);
+}
+
+function getTraceSulfateElement(fertilizerId) {
+  return Object.entries(TRACE_SULFATE_FALLBACK_IDS)
+    .find(([, id]) => id === fertilizerId)?.[0] ?? null;
+}
+
+function isPreferredChelatedTrace(fertilizerId) {
+  return Object.values(CHELATED_TRACE_PREFERRED_IDS).includes(fertilizerId);
+}
+
 function getReverseTargetElements() {
   const hasSpecificNitrogen =
     typeof state.targets["NO3-N"] === "number" ||
@@ -2662,7 +3062,7 @@ function getReverseTargetElements() {
 }
 
 function isTraceSulfateFertilizer(fertilizerId) {
-  return ["mnso4", "znso4", "cuso4"].includes(fertilizerId);
+  return Object.values(TRACE_SULFATE_FALLBACK_IDS).includes(fertilizerId);
 }
 
 function isAcidFertilizer(fertilizer) {
@@ -2724,7 +3124,7 @@ function evaluateReverseSuggestion(profile, bucketA, bucketB) {
   const totalMmol = buildTotalMmol(aResult, bResult);
   const acidProfile = buildTotalAcidProfile(aResult, bResult);
   const phValue = calculatePH(totalMmol, acidProfile);
-  const phTarget = state.targets.pH;
+  const phTarget = getEffectivePHTarget(profile);
   const phAssessment = assessPHDeviation(phValue, phTarget);
   const phDeviation = typeof phTarget === "number" && Number.isFinite(phTarget) && phTarget > 0
     ? {
@@ -2767,6 +3167,7 @@ function evaluateReverseSuggestion(profile, bucketA, bucketB) {
     (phAssessment?.penalty ?? 0) +
     (bucketA.length + bucketB.length) * 0.04 +
     nitricAcidRegulatoryScore(bucketA, bucketB) +
+    preferenceAcidScore(profile, bucketA, bucketB) +
     costScore;
 
   return {
@@ -2789,6 +3190,16 @@ function nitricAcidRegulatoryScore(bucketA, bucketB) {
   return [...bucketA, ...bucketB].reduce((sum, row) => {
     if (row.fertilizerId !== "hno3-40") return sum;
     return sum + (Number(row.amount) || 0) * NITRIC_ACID_REGULATORY_PENALTY_PER_KG;
+  }, 0);
+}
+
+function preferenceAcidScore(profile, bucketA, bucketB) {
+  const acidPenalty = profile.acidPenalty || {};
+  return [...bucketA, ...bucketB].reduce((sum, row) => {
+    const amount = Number(row.amount) || 0;
+    if (row.fertilizerId === "hno3-40") return sum + amount * (acidPenalty.nitric || 0);
+    if (row.fertilizerId === "h3po4-85") return sum + amount * (acidPenalty.phosphoric || 0);
+    return sum;
   }, 0);
 }
 
@@ -2897,7 +3308,7 @@ function calculateSuggestionCost(bucketA, bucketB) {
 }
 
 function applyPHTargetAdjustment(profile, bucketA, bucketB) {
-  const targetPH = state.targets.pH;
+  const targetPH = getEffectivePHTarget(profile);
   if (!(typeof targetPH === "number" && Number.isFinite(targetPH) && targetPH > 0)) return;
 
   const currentPH = estimateSuggestionPH(bucketA, bucketB);
@@ -2982,7 +3393,7 @@ function applyPHTargetAdjustment(profile, bucketA, bucketB) {
 }
 
 function applySupplementalPhosphoricAcid(profile, bucketA, bucketB) {
-  const targetPH = state.targets.pH;
+  const targetPH = getEffectivePHTarget(profile);
   const targetP = state.targets.P;
   if (!(typeof targetPH === "number" && Number.isFinite(targetPH) && targetPH > 0)) return;
   if (!(typeof targetP === "number" && Number.isFinite(targetP) && targetP > 0)) return;

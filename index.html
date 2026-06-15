@@ -315,6 +315,21 @@
     margin-top: 2px; font-size: 18px; font-weight: 600;
     font-variant-numeric: tabular-nums; color: var(--fg);
   }
+  .preference-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px; margin: 14px 0;
+  }
+  .preference-grid label {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 8px 12px;
+    display: grid; gap: 6px; transition: border-color var(--transition);
+  }
+  .preference-grid label:focus-within { border-color: var(--primary); }
+  .preference-grid .lbl { font-size: 11px; color: var(--muted); }
+  .preference-grid select {
+    width: 100%; border: none; background: transparent; outline: none;
+    font: inherit; font-size: 13px; color: var(--fg); cursor: pointer;
+  }
 
   /* ── Mix list ───────────────────────────────────────────────────────────── */
   .mix-list { display: flex; flex-direction: column; gap: 8px; }
@@ -540,6 +555,7 @@
   [data-theme="dark"] .inventory-item,
   [data-theme="dark"] .water-cell,
   [data-theme="dark"] .stock-config label,
+  [data-theme="dark"] .preference-grid label,
   [data-theme="dark"] .stock-total,
   [data-theme="dark"] .mix-item,
   [data-theme="dark"] .grams-row,
@@ -568,6 +584,14 @@
   }
   .bucket-mol-card.a h4 { color: var(--a-fg); }
   .bucket-mol-card.b h4 { color: var(--b-fg); }
+  .bucket-mol-card.npk-grade {
+    grid-column: 1 / -1;
+  }
+  .bucket-mol-card.npk-grade h4 { color: var(--fg); }
+  .npk-grade-value {
+    font-size: 22px; font-weight: 800; line-height: 1.1;
+    font-variant-numeric: tabular-nums; color: var(--accent);
+  }
   .grams-row {
     display: flex; justify-content: space-between; align-items: center;
     background: var(--card); border-radius: 6px; padding: 5px 10px; font-size: 13px;
@@ -1009,6 +1033,46 @@
       </div>
     </div>
     <p id="mode2TargetStatus" class="muted">设定目标浓度后将自动生成 3 套配方建议 · 支持 PDF / Excel / 图片 OCR</p>
+    <div class="preference-grid">
+      <label>
+        <span class="lbl">铁源策略</span>
+        <select id="prefIronStrategy">
+          <option value="adaptive">按目标 pH 选择铁-13 / 铁-11 / 铁-6</option>
+          <option value="high-ph">尽量保留较高 pH，优先铁-6</option>
+        </select>
+      </label>
+      <label>
+        <span class="lbl">微量元素</span>
+        <select id="prefTraceChelate">
+          <option value="prefer">优先螯合态 Mn/Zn/Cu 与四水八硼</option>
+          <option value="any">允许硫酸盐 / 硼砂参与成本比较</option>
+        </select>
+      </label>
+      <label>
+        <span class="lbl">成本控制</span>
+        <select id="prefCostPriority">
+          <option value="balanced">平衡成本与适配性</option>
+          <option value="low">更重视低成本</option>
+          <option value="quality">更重视稳定性</option>
+        </select>
+      </label>
+      <label>
+        <span class="lbl">硝酸</span>
+        <select id="prefNitricAcid">
+          <option value="avoid">尽量不用硝酸</option>
+          <option value="allow">可使用硝酸</option>
+          <option value="unavailable">不可用硝酸</option>
+        </select>
+      </label>
+      <label>
+        <span class="lbl">磷酸</span>
+        <select id="prefPhosphoricAcid">
+          <option value="allow">可使用磷酸</option>
+          <option value="avoid">尽量不用磷酸</option>
+          <option value="unavailable">不可用磷酸</option>
+        </select>
+      </label>
+    </div>
     <div id="mode2TargetGrid" class="water-grid"></div>
   </section>
 

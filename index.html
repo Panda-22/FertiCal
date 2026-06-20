@@ -112,7 +112,9 @@
     background: linear-gradient(135deg, #ffffff 42%, #c6d1e4);
     -webkit-background-clip: text; background-clip: text;
   }
-  .hero-text { color: var(--muted); font-size: 14px; max-width: 640px; margin: 0; }
+  .hero-text {
+    color: var(--muted); font-size: 14px; max-width: 640px; min-height: 42px; margin: 0;
+  }
   .hero-text .a-text { color: var(--a-fg); font-weight: 600; }
   .hero-text .b-text { color: var(--b-fg); font-weight: 600; }
 
@@ -708,6 +710,32 @@
     font-size: 13px;
     padding: 8px 10px;
   }
+
+  .soil-target-grid {
+    display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr));
+    gap: 12px; margin: 18px 0;
+  }
+  .soil-target-grid label {
+    display: flex; flex-direction: column; gap: 6px;
+    color: var(--muted); font-size: 12px;
+  }
+  .soil-target-grid input, .soil-target-grid select {
+    width: 100%; min-height: 40px; padding: 8px 10px;
+    color: var(--fg); background: var(--card);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+  }
+  .soil-note {
+    padding: 12px 14px; border-left: 3px solid var(--warn);
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    color: var(--muted); font-size: 12px;
+  }
+  .soil-formula-table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+  .soil-formula-table th, .soil-formula-table td {
+    padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: left; font-size: 12px;
+  }
+  .soil-formula-table th:last-child, .soil-formula-table td:last-child { text-align: right; }
+  .soil-grade { font-weight: 700; color: var(--good); }
   .calibration-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -787,6 +815,7 @@
     .result-grid      { grid-template-columns: 1fr; }
     .suggestion-grid  { grid-template-columns: 1fr; }
     .grams-grid       { grid-template-columns: 1fr; }
+    .soil-target-grid { grid-template-columns: repeat(2, 1fr); }
     h1                { font-size: 26px; }
     .hero-right       { align-items: flex-start; }
   }
@@ -820,8 +849,7 @@
         <button id="themeToggle" title="切换明暗模式">🌙</button>
       </div>
       <p id="heroText" class="hero-text">
-        上传水质检测报告，分别配置 <span class="a-text">A 桶</span> 与 <span class="b-text">B 桶</span>
-        肥料、母液体积与稀释倍数。页面实时折算肥料元素含量，叠加原水背景，得到根区理论进液浓度。
+        请选择适合当前任务的功能：核算已有施肥配方、按目标元素设计水肥配方，或按 N-P₂O₅-K₂O 生成土壤施肥方案。
       </p>
     </div>
     <div class="hero-right">
@@ -836,6 +864,11 @@
           <div class="mode-card-title">设计施肥配方</div>
           <div class="mode-card-desc">输入目标浓度，自动推荐配方方案</div>
         </button>
+        <button class="mode-card" id="modeBtn3">
+          <div class="mode-card-num">功能 03</div>
+          <div class="mode-card-title">土壤施肥配方</div>
+          <div class="mode-card-desc">指定 N-P₂O₅-K₂O，生成复配方案</div>
+        </button>
       </div>
     </div>
   </header>
@@ -848,13 +881,13 @@
         <div class="head-text">
           <p class="kicker">Step 01</p>
           <h2>水质背景</h2>
-          <p>上传水质报告或直接编辑下方原水值</p>
+          <p>请上传最近一次灌溉用水成分分析报告，或直接编辑下方原水值</p>
         </div>
       </div>
       <div class="water-actions">
         <label class="file-picker">
           <input id="reportFile" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp" />
-          <span>⬆ 导入报告</span>
+          <span>↑ 上传报告</span>
         </label>
         <button id="roWater" class="btn-ghost" type="button">RO水灌溉</button>
         <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
@@ -877,15 +910,17 @@
       <div class="import-grid">
         <label class="file-picker">
           <input id="targetFile" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff" />
-          <span>导入目标文件</span>
+          <span>↑ 上传目标文件</span>
         </label>
         <label class="file-picker">
           <input id="formulaFile" type="file" accept=".xlsx,.xls,.csv,.txt,.pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff" />
-          <span>导入配方文件</span>
+          <span>↑ 上传配方文件</span>
         </label>
         <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
       </div>
     </div>
+    <p class="muted">也可以直接填写目标元素浓度：</p>
+    <div id="importTargetGrid" class="water-grid"></div>
     <p id="targetImportStatus" class="muted">目标文件支持 PDF / Excel / CSV / TXT / 图片 OCR</p>
     <p id="formulaImportStatus" class="muted">配方文件支持 Excel / CSV / TXT / PDF / 图片 OCR，建议包含 A桶/B桶、名称、kg/100L</p>
   </section>
@@ -984,14 +1019,15 @@
         <div class="head-text">
           <p class="kicker">Step 04</p>
           <h2>导出配方</h2>
-          <p>确认 A/B 桶微调后的用量，导出当前配方并记录与建议方案的差异</p>
+          <p id="formulaExportDescription">确认微调后的用量，导出当前配方并记录为后续推荐偏好</p>
         </div>
       </div>
       <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
     </div>
+    <div id="formulaAdjustmentEditor"></div>
     <div class="suggestion-export">
       <label>
-        <span>AB肥配制量</span>
+        <span id="formulaExportVolumeLabel">配方导出量</span>
         <select id="formulaExportVolume">
           <option value="100">100 L</option>
           <option value="1000">1000 L</option>
@@ -1006,7 +1042,7 @@
       </label>
       <button id="exportSelectedFormula" class="btn-a" type="button">导出配方</button>
     </div>
-    <p id="formulaExportStatus" class="muted">导出后会在本机浏览器中保留一条微调记录，用于后续优化建议算法。</p>
+    <p id="formulaExportStatus" class="muted">导出后会在本机浏览器中保存本次配方，并用于功能 2、3 的后续推荐。</p>
   </section>
 
   <!-- ── Mode 2 only: Target elements input ───────────────────────────────── -->
@@ -1027,7 +1063,7 @@
         <button id="clearTargets2" class="btn-ghost">清空</button>
         <label class="file-picker">
           <input id="targetFileM2" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff" />
-          <span>导入目标文件</span>
+          <span>↑ 上传目标文件</span>
         </label>
         <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
       </div>
@@ -1074,6 +1110,53 @@
       </label>
     </div>
     <div id="mode2TargetGrid" class="water-grid"></div>
+  </section>
+
+  <section id="mode3SoilSection" class="panel module-panel is-collapsed" style="display:none">
+    <div class="panel-head">
+      <div class="head-row">
+        <div class="badge">02</div>
+        <div class="head-text">
+          <p class="kicker">Step 02 · Soil formula</p>
+          <h2>目标 N-P₂O₅-K₂O 百分比</h2>
+          <p>原水背景 + 推荐肥料贡献按投肥量折算，结果允许在目标值 ±20% 内</p>
+        </div>
+      </div>
+      <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
+    </div>
+    <div class="soil-target-grid">
+      <label>总氮 N (%)<input id="soilTargetN" type="number" min="0" max="46" step="0.1" value="15"></label>
+      <label>磷 P₂O₅ (%)<input id="soilTargetP2O5" type="number" min="0" max="61" step="0.1" value="15"></label>
+      <label>钾 K₂O (%)<input id="soilTargetK2O" type="number" min="0" max="62" step="0.1" value="15"></label>
+      <label>配制总量 (kg)<input id="soilBatchWeight" type="number" min="1" step="1" value="100"></label>
+      <label>每吨水施肥量 (kg)<input id="soilApplicationRate" type="number" min="0.01" step="0.1" value="1"></label>
+      <label>氯偏好
+        <select id="soilChloridePreference">
+          <option value="avoid">低氯，优先硫酸钾</option>
+          <option value="allow">允许氯化钾参与</option>
+        </select>
+      </label>
+    </div>
+    <div class="water-actions">
+      <button id="generateSoilFormulas" class="btn-a" type="button">生成 3 套方案</button>
+    </div>
+    <p class="soil-note">目标百分比以每吨水施肥量为折算基准，原水中的 N、P、K 会先计入最终结果。所有含钙原料固定进入 A 桶，含磷或硫原料固定进入 B 桶，禁止在浓缩液中混合。默认不使用硝酸、磷酸等无机酸；pH 结合原水值只评价酸化方向。</p>
+  </section>
+
+  <section id="mode3ResultsSection" class="panel module-panel is-collapsed" style="display:none">
+    <div class="panel-head">
+      <div class="head-row">
+        <div class="badge">03</div>
+        <div class="head-text">
+          <p class="kicker">Step 03 · Alternatives</p>
+          <h2>土壤施肥配方备选</h2>
+          <p>方案计入原水 NPK；绿色表示处于目标值 ±20% 的可接受范围</p>
+        </div>
+      </div>
+      <button class="btn-ghost module-toggle" type="button" data-module-toggle>展开</button>
+    </div>
+    <p id="soilFormulaStatus" class="muted"></p>
+    <div id="soilFormulaSuggestions" class="suggestion-grid"></div>
   </section>
 
   <!-- ── Step 04: Results ───────────────────────────────────────────────────── -->
@@ -1179,7 +1262,7 @@
       <button id="saveTitration" class="btn-a" type="button">保存校准数据</button>
     </div>
     <div id="calibrationReadout" class="calibration-readout"></div>
-    <p id="calibrationStatus" class="muted">保存后会写入本机 SQLite，用于后续 pH/EC 贡献系数校准。</p>
+    <p id="calibrationStatus" class="muted"></p>
   </section>
 </div>
 

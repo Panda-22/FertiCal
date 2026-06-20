@@ -103,7 +103,8 @@ function calculateEC(totalMmol) {
   const no3 = totalMmol["NO3-N"] ?? 0;
   const nh4 = totalMmol["NH4-N"] ?? 0;
   const totalN = totalMmol["N"] ?? 0;
-  const unaccountedN = Math.max(0, totalN - no3 - nh4);
+  const neutralN = totalMmol["neutral-N"] ?? 0;
+  const unaccountedN = Math.max(0, totalN - no3 - nh4 - neutralN);
   if (unaccountedN > 0) {
     ec += unaccountedN * EC_COEFFICIENTS["NO3-N"];
   }
@@ -114,8 +115,8 @@ function calculatePH(totalMmol, acidProfile = null) {
   try {
     const rawPH = calculatePHImpl(totalMmol, acidProfile);
     return applyPHCalibration(rawPH);
-  } catch (e) {
-    console.error('FertiCal: calculatePH error', e);
+  } catch (error) {
+    console.warn("pH estimate fell back to neutral", error);
     return 7.0;
   }
 }
@@ -599,11 +600,41 @@ const FERTILIZER_CATALOG = [
     notes: "H3PO4 85%",
     compounds: [{ label: "P", percent: 26.89, element: "P" }],
     acidContrib: [{ key: "h3po4", purity: 0.85, molarMass: 97.994 }]
+  },
+  {
+    id: "urea",
+    name: "尿素（46%N）",
+    bucket: "AB",
+    nonIonicNitrogen: true,
+    notes: "CO(NH2)2 · 46% 酰胺态氮",
+    compounds: [{ label: "N", percent: 46, element: "N" }]
+  },
+  {
+    id: "ammonium-sulfate",
+    name: "硫酸铵",
+    bucket: "B",
+    notes: "(NH4)2SO4 · 21.2% NH4-N · 24.3% S · 生理酸性肥料",
+    compounds: [
+      { label: "NH4-N", percent: 21.2, element: "NH4-N" },
+      { label: "S", percent: 24.3, element: "S" }
+    ]
+  },
+  {
+    id: "urea-phosphate",
+    name: "磷酸脲",
+    bucket: "B",
+    nonIonicNitrogen: true,
+    notes: "CO(NH2)2·H3PO4 · 17.7% N · 44.9% P2O5 · 酸性肥料",
+    compounds: [
+      { label: "N", percent: 17.7, element: "N" },
+      { label: "P", percent: 19.6, element: "P" }
+    ],
+    acidContrib: [{ key: "h3po4", purity: 1, molarMass: 158.05 }]
   }
 ];
 
-// 测试用随机单价，单位：元/kg；后续接入真实原料价格时替换这里即可。
-const TEST_FERTILIZER_PRICES = {
+// 暂用行情价，单位：元/kg。后续若接入采购报价，只需要替换这张表。
+const MARKET_PRICE_BY_FERTILIZER = {
   "ca-no3-4h2o": 3.8,
   "mg-no3-6h2o": 5.6,
   can: 2.9,
@@ -626,13 +657,22 @@ const TEST_FERTILIZER_PRICES = {
   znso4: 9.4,
   cuso4: 18,
   na2moo4: 96,
-  "h3po4-85": 7.2
+  "h3po4-85": 7.2,
+  urea: 2.6,
+  "ammonium-sulfate": 1.5,
+  "urea-phosphate": 7.8
 };
 
 const DEFAULT_FERTILIZER_PRICE = 10;
-const AVERAGE_TEST_FERTILIZER_PRICE =
-  Object.values(TEST_FERTILIZER_PRICES).reduce((sum, price) => sum + price, 0) /
-  Object.values(TEST_FERTILIZER_PRICES).length;
+const WATER_FERTILIZER_IDS = new Set(
+  FERTILIZER_CATALOG.filter((item) => !item.soilOnly).map((item) => item.id)
+);
+const WATER_FERTILIZER_PRICES = Object.entries(MARKET_PRICE_BY_FERTILIZER)
+  .filter(([id]) => WATER_FERTILIZER_IDS.has(id))
+  .map(([, price]) => price);
+const AVERAGE_FERTILIZER_PRICE =
+  WATER_FERTILIZER_PRICES.reduce((sum, price) => sum + price, 0) /
+  WATER_FERTILIZER_PRICES.length;
 const CHELATED_TRACE_PREFERRED_IDS = {
   Mn: "edta-mn-13",
   Zn: "edta-zn-15",
@@ -719,14 +759,17 @@ const TARGET_PRESETS = [
 
 let CALC_MODE = "forward";
 let APP_MODE = 0;
-let _recalcTimer = null;
-let _statusHoldUntil = 0;
+let recalcTimer = null;
+let statusHoldUntil = 0;
 const state = {
   water: Object.fromEntries(ELEMENT_META.map((item) => [item.key, 0])),
   targets: Object.fromEntries(ELEMENT_META.map((item) => [item.key, null])),
   inventory: Object.fromEntries(FERTILIZER_CATALOG.map((item) => [item.id, true])),
   reverseSuggestions: [],
   selectedReverseIndex: null,
+  soilSuggestions: [],
+  selectedSoilIndex: null,
+  soilAdjustedRows: [],
   cropType: null,
   isRoWater: false,
   lastWaterSource: "",
@@ -766,6 +809,9 @@ const targetFile = document.querySelector("#targetFile");
 const formulaFile = document.querySelector("#formulaFile");
 const targetImportStatus = document.querySelector("#targetImportStatus");
 const formulaImportStatus = document.querySelector("#formulaImportStatus");
+const calcStatus = document.querySelector("#calcStatus");
+const targetPreset = document.querySelector("#targetPreset");
+const targetPreset2 = document.querySelector("#targetPreset2");
 const measuredEcInput = document.querySelector("#measuredEc");
 const measuredPhInput = document.querySelector("#measuredPh");
 const titrationNotesInput = document.querySelector("#titrationNotes");
@@ -794,6 +840,24 @@ function init() {
   bindModeEvents();
   setMode(0);
   setTimeout(loadPHCalibration, 0);
+}
+
+function setStatus(message, holdMs = 0) {
+  if (!calcStatus) return;
+  calcStatus.textContent = message;
+  statusHoldUntil = holdMs ? Date.now() + holdMs : 0;
+}
+
+function resetWaterValues() {
+  Object.keys(state.water).forEach((key) => {
+    state.water[key] = 0;
+  });
+}
+
+function resetTargetPresetSelects() {
+  [targetPreset, targetPreset2].forEach((select) => {
+    if (select) select.value = "";
+  });
 }
 
 function bindStaticEvents() {
@@ -836,14 +900,14 @@ function bindStaticEvents() {
     }
   });
 
-  document.querySelector("#targetPreset")?.addEventListener("change", (event) => {
+  targetPreset?.addEventListener("change", (event) => {
     applyTargetPreset(event.target.value);
   });
 
   document.querySelector("#clearTargets")?.addEventListener("click", () => {
     clearReverseSelection();
     clearTargets();
-    document.querySelector("#targetPreset").value = "";
+    if (targetPreset) targetPreset.value = "";
     renderTargetTable();
     recalculate();
   });
@@ -875,7 +939,9 @@ function buildRow(bucket) {
 }
 
 function getCatalogByBucket(bucket) {
-  return FERTILIZER_CATALOG.filter((item) => item.bucket === bucket || item.bucket === "AB");
+  return FERTILIZER_CATALOG.filter((item) =>
+    !item.soilOnly && (item.bucket === bucket || item.bucket === "AB")
+  );
 }
 
 function renderWaterTable() {
@@ -913,9 +979,7 @@ function renderWaterTable() {
 }
 
 function applyRoWater() {
-  ELEMENT_META.forEach((item) => {
-    state.water[item.key] = 0;
-  });
+  resetWaterValues();
   state.isRoWater = true;
   clearReverseSelection();
   renderWaterTable();
@@ -992,7 +1056,11 @@ function renderBucket(bucket) {
 }
 
 function renderTargetTable() {
-  const grids = [targetGrid, document.getElementById("mode2TargetGrid")].filter(Boolean);
+  const grids = [
+    targetGrid,
+    document.getElementById("mode2TargetGrid"),
+    document.getElementById("importTargetGrid")
+  ].filter(Boolean);
   if (!grids.length) return;
   const html = renderGroupedElementCells(ELEMENT_META, (item) => `
     <label class="water-cell">
@@ -1021,7 +1089,7 @@ function renderTargetTable() {
 
 function renderInventoryGrid() {
   if (!inventoryGrid) return;
-  inventoryGrid.innerHTML = FERTILIZER_CATALOG.map((item) => `
+  inventoryGrid.innerHTML = FERTILIZER_CATALOG.filter((item) => !item.soilOnly).map((item) => `
     <label class="inventory-item">
       <input data-inventory-id="${item.id}" type="checkbox" ${state.inventory[item.id] ? "checked" : ""} />
       <div>
@@ -1074,7 +1142,9 @@ function applyTargetPreset(presetId) {
 }
 
 function clearTargets() {
-  Object.keys(state.targets).forEach((key) => { state.targets[key] = null; });
+  Object.keys(state.targets).forEach((key) => {
+    state.targets[key] = null;
+  });
   state.cropType = null;
 }
 
@@ -1085,11 +1155,15 @@ function applyDefaultTargetPH() {
 }
 
 function recalculate() {
-  clearTimeout(_recalcTimer);
-  _recalcTimer = setTimeout(_doRecalculate, 150);
+  clearTimeout(recalcTimer);
+  recalcTimer = setTimeout(recalculateNow, 150);
 }
 
-function _doRecalculate() {
+function recalculateNow() {
+  if (APP_MODE === 3) {
+    generateSoilFormulas();
+    return;
+  }
   if (APP_MODE === 2) {
     if (state.selectedReverseIndex == null) {
       calculateReverse();
@@ -1102,7 +1176,6 @@ function _doRecalculate() {
 }
 
 function renderCurrentCalculation() {
-  const statusEl = document.querySelector("#calcStatus");
   try {
     const bucketAResult = calculateBucket(state.bucketA, getNumericField("aTankVolume"), getNumericField("aDilution"));
     const bucketBResult = calculateBucket(state.bucketB, getNumericField("bTankVolume"), getNumericField("bDilution"));
@@ -1126,13 +1199,13 @@ function renderCurrentCalculation() {
     renderPrecipitation(bucketAResult, bucketBResult);
     renderCalibrationReadout();
 
-    if (statusEl && Date.now() > _statusHoldUntil) {
+    if (calcStatus && Date.now() > statusHoldUntil) {
       const hasData = Object.values(bucketAResult.totals).some(v => v > 0) || Object.values(bucketBResult.totals).some(v => v > 0);
-      statusEl.textContent = hasData ? "计算完成" : "";
+      calcStatus.textContent = hasData ? "计算完成" : "";
     }
   } catch (err) {
-    console.error('FertiCal recalculate error:', err);
-    if (statusEl) statusEl.textContent = "错误: " + err.message;
+    console.error("Calculation failed", err);
+    setStatus(`计算出错：${err.message}`);
   }
 }
 
@@ -1140,6 +1213,7 @@ function calculateBucket(rows, tankVolume, dilutionFactor) {
   const totals = emptyElementMap();
   const acidTotals = emptyAcidProfile();
   let totalFertilizerGrams = 0;
+  let neutralNitrogenGrams = 0;
 
   rows.forEach((row) => {
     const fertilizer = getFertilizer(row.fertilizerId);
@@ -1148,13 +1222,16 @@ function calculateBucket(rows, tankVolume, dilutionFactor) {
     fertilizer.compounds.forEach((compound) => {
       const mass = amountInGrams * (compound.percent / 100);
       totals[compound.element] += mass;
+      if (fertilizer.nonIonicNitrogen && compound.element === "N") {
+        neutralNitrogenGrams += mass;
+      }
     });
     fertilizer.acidContrib?.forEach((acid) => {
       acidTotals[acid.key] += amountInGrams * acid.purity / acid.molarMass;
     });
   });
 
-  totals.N = totals["NO3-N"] + totals["NH4-N"];
+  totals.N = totals.N + totals["NO3-N"] + totals["NH4-N"];
 
   const perLiter = emptyElementMap();
   const irrigation = emptyElementMap();
@@ -1184,7 +1261,18 @@ function calculateBucket(rows, tankVolume, dilutionFactor) {
     acidIrrigation[key] = acidPerLiter[key] / dilutionFactor;
   });
 
-  return { totals, perLiter, irrigation, perLiterMmol, irrigationMmol, acidTotals, acidPerLiter, acidIrrigation, totalFertilizerGrams };
+  const neutralNitrogenPerLiterMmol = tankVolume
+    ? neutralNitrogenGrams * 1000 / tankVolume / MOLAR_MASS.N
+    : 0;
+  const neutralNitrogenIrrigationMmol = dilutionFactor
+    ? neutralNitrogenPerLiterMmol / dilutionFactor
+    : 0;
+
+  return {
+    totals, perLiter, irrigation, perLiterMmol, irrigationMmol,
+    acidTotals, acidPerLiter, acidIrrigation, totalFertilizerGrams,
+    neutralNitrogenPerLiterMmol, neutralNitrogenIrrigationMmol
+  };
 }
 
 function renderSummary(target, bucketResult, bucketName) {
@@ -1317,6 +1405,9 @@ function buildTotalMmol(bucketAResult, bucketBResult) {
       (bucketAResult.irrigationMmol[item.key] ?? 0) +
       (bucketBResult.irrigationMmol[item.key] ?? 0);
   });
+  totalMmol["neutral-N"] =
+    (bucketAResult.neutralNitrogenIrrigationMmol ?? 0) +
+    (bucketBResult.neutralNitrogenIrrigationMmol ?? 0);
   return totalMmol;
 }
 
@@ -1341,7 +1432,7 @@ function formatAcidContribution(profile, pH) {
 function renderIrrigation(bucketAResult, bucketBResult) {
   try {
     if (!irrigationBody) {
-      console.error('FertiCal: irrigationBody DOM element not found');
+      console.warn("Irrigation result table is missing");
       return;
     }
     const isConvertible = (key) => Boolean(MOLAR_MASS[key]);
@@ -1419,8 +1510,8 @@ function renderIrrigation(bucketAResult, bucketBResult) {
       `;
     }).join("");
   } catch (err) {
-    console.error('renderIrrigation ERROR:', err.message, err.stack);
-    irrigationBody.innerHTML = `<tr><td colspan="8" style="color:red">renderIrrigation错误: ${err.message}</td></tr>`;
+    console.error("Irrigation table failed to render", err);
+    irrigationBody.innerHTML = `<tr><td colspan="8" style="color:red">结果表渲染失败：${escapeHtml(err.message)}</td></tr>`;
   }
 }
 
@@ -1490,6 +1581,7 @@ function buildStockMmol(bucketResult) {
       (toMmolPerLiter(item.key, state.water[item.key] ?? 0) ?? 0) +
       (bucketResult.perLiterMmol[item.key] ?? 0);
   });
+  stockMmol["neutral-N"] = bucketResult.neutralNitrogenPerLiterMmol ?? 0;
   return stockMmol;
 }
 
@@ -1520,7 +1612,7 @@ async function handleReportUpload(event) {
   try {
     const buffer = await readFileAsArrayBuffer(file);
     const parsed = await parseWaterReportFile(file, buffer);
-    Object.keys(state.water).forEach((key) => { state.water[key] = 0; });
+    resetWaterValues();
     Object.assign(state.water, parsed.values);
     state.isRoWater = false;
     state.lastWaterSource = parsed.sheetName || file.name;
@@ -1528,9 +1620,10 @@ async function handleReportUpload(event) {
     syncWaterTotalN();
     renderWaterTable();
     recalculate();
+    setModuleCollapsed(document.getElementById("waterSection"), false);
     reportStatus.textContent = `已导入 ${file.name}，识别到 ${parsed.hitCount} 个指标，来源：${parsed.sheetName}`;
   } catch (error) {
-    console.error(error);
+    console.warn("Water report import failed", error);
     const message = error?.message === "Not Found"
       ? "后端接口不存在，请停止旧后端后重新运行 backend/start.sh"
       : (error?.message || "请确认文件可正常打开；PDF/图片需启动本地后端并安装 OCR 依赖");
@@ -1594,16 +1687,17 @@ async function handleTargetUpload(event) {
     });
     syncTargetTotalN();
     applyDefaultTargetPH();
-    ["#targetPreset", "#targetPreset2"].forEach((sel) => {
-      const el = document.querySelector(sel);
-      if (el) el.value = "";
-    });
+    resetTargetPresetSelects();
     clearReverseSelection();
     renderTargetTable();
     recalculate();
+    setModuleCollapsed(
+      document.getElementById(APP_MODE === 2 ? "mode2TargetSection" : "importPanel"),
+      false
+    );
     statusEl.textContent = `已导入 ${file.name}，识别到 ${Object.keys(parsed.values || {}).length} 个目标指标`;
   } catch (error) {
-    console.error(error);
+    console.warn("Target import failed", error);
     const message = error?.message === "Not Found"
       ? "后端接口不存在，请停止旧后端后重新运行 backend/start.sh"
       : (error?.message || "请确认后端已启动，并安装解析依赖");
@@ -1642,10 +1736,14 @@ async function handleFormulaUpload(event) {
     renderBucket("A");
     renderBucket("B");
     recalculate();
+    setModuleCollapsed(document.getElementById("importPanel"), false);
+    document.querySelectorAll("#bucketGrid .module-panel").forEach((panel) => {
+      setModuleCollapsed(panel, false);
+    });
     formulaImportStatus.textContent =
       `已导入 ${file.name}，A桶 ${parsed.bucketA.length} 项，B桶 ${parsed.bucketB.length} 项，来源工作表：${parsed.sheetName}`;
   } catch (error) {
-    console.error(error);
+    console.warn("Formula import failed", error);
     const message = error?.message === "Not Found"
       ? "后端接口不存在，请停止旧后端后重新运行 backend/start.sh"
       : (error?.message || "请确认文件包含 A桶/B桶、名称、kg/100L");
@@ -2200,7 +2298,7 @@ async function loadPHCalibration() {
     renderCurrentCalculation();
   } catch (error) {
     state.phCalibration = null;
-    console.warn("FertiCal: pH calibration unavailable", error);
+    console.warn("pH calibration is unavailable", error);
   }
 }
 
@@ -2253,7 +2351,7 @@ async function saveCurrentTitration() {
       `已保存。EC 偏差 ${ecDelta >= 0 ? "+" : ""}${formatNumber(ecDelta)} uS/cm，pH 偏差 ${phDelta >= 0 ? "+" : ""}${phDelta.toFixed(2)}。`;
     await loadPHCalibration();
   } catch (error) {
-    console.error(error);
+    console.warn("Titration save failed", error);
     calibrationStatus.textContent = `保存失败：${error?.message || "请确认本地后端已启动"}`;
   } finally {
     saveTitrationBtn.disabled = false;
@@ -2366,17 +2464,14 @@ function exportResults() {
 }
 
 function exportSelectedFormula() {
-  const selected = state.reverseSuggestions[state.selectedReverseIndex];
-  if (!selected) {
-    alert("请先采用一个配方方案");
-    return;
-  }
+  const context = getFormulaExportContext();
+  if (!context) return;
 
   const volume = Number(document.querySelector("#formulaExportVolume")?.value || 100);
   const format = document.querySelector("#formulaExportFormat")?.value || "xlsx";
-  const currentFormula = buildCurrentFormulaSnapshot(selected);
+  const { selected, currentFormula } = context;
   const rows = buildFormulaExportRows(currentFormula, volume);
-  recordFormulaAdjustment(selected, currentFormula);
+  recordFormulaAdjustment(selected, currentFormula, APP_MODE);
 
   if (format === "pdf") {
     exportFormulaPdf(currentFormula, volume, rows);
@@ -2384,10 +2479,57 @@ function exportSelectedFormula() {
     exportFormulaWorkbook(currentFormula, volume, rows);
   }
 
-  const statusEl = document.querySelector("#calcStatus");
-  if (statusEl) statusEl.textContent = `已导出当前微调后的「${selected.name}」`;
+  setStatus(`已导出当前微调后的「${currentFormula.name}」`);
   const exportStatus = document.querySelector("#formulaExportStatus");
-  if (exportStatus) exportStatus.textContent = "已记录本次微调与原建议方案的差异，可用于后续优化建议算法。";
+  if (exportStatus) exportStatus.textContent = "已保存本次微调配方；功能 2、3 的下次推荐会参考这项偏好。";
+}
+
+function getFormulaExportContext() {
+  if (APP_MODE === 3) {
+    const selected = state.soilSuggestions[state.selectedSoilIndex];
+    if (!selected) {
+      alert("请先采用一个土壤施肥方案，再微调并导出");
+      return null;
+    }
+    syncSoilAdjustedRowsFromEditor();
+    return {
+      selected: soilSuggestionToFormula(selected),
+      currentFormula: {
+        id: `${selected.id}-soil-adjusted`,
+        name: `${selected.name}（微调后）`,
+        sourceSuggestionId: selected.id,
+        sourceSuggestionName: selected.name,
+        baseAmount: selected.batch,
+        amountUnit: "kg",
+        bucketA: soilRowsToFormulaRows(state.soilAdjustedRows.filter((row) => row.bucket === "A")),
+        bucketB: soilRowsToFormulaRows(state.soilAdjustedRows.filter((row) => row.bucket === "B"))
+      }
+    };
+  }
+
+  if (APP_MODE === 2) {
+    const selected = state.reverseSuggestions[state.selectedReverseIndex];
+    if (!selected) {
+      alert("请先采用一个配方方案");
+      return null;
+    }
+    return { selected, currentFormula: buildCurrentFormulaSnapshot(selected) };
+  }
+
+  if (APP_MODE === 1) {
+    if (!state.bucketA.length && !state.bucketB.length) {
+      alert("请先添加或导入 A/B 桶配方");
+      return null;
+    }
+    const selected = {
+      id: "mode1-current",
+      name: state.lastFormulaSource || "当前配方",
+      bucketA: state.bucketA.map((row) => ({ ...row })),
+      bucketB: state.bucketB.map((row) => ({ ...row }))
+    };
+    return { selected, currentFormula: buildCurrentFormulaSnapshot(selected) };
+  }
+  return null;
 }
 
 function buildCurrentFormulaSnapshot(selected) {
@@ -2402,8 +2544,8 @@ function buildCurrentFormulaSnapshot(selected) {
 }
 
 function buildFormulaExportRows(formula, volume) {
-  const aBase = getNumericField("aTankVolume") || 100;
-  const bBase = getNumericField("bTankVolume") || 100;
+  const aBase = formula.baseAmount || getNumericField("aTankVolume") || 100;
+  const bBase = formula.baseAmount || getNumericField("bTankVolume") || 100;
   const buildRows = (bucket, sourceRows, baseVolume) => sourceRows.map((row) => {
     const fertilizer = getFertilizer(row.fertilizerId);
     const sourceAmount = row.unit === "kg" ? row.amount : row.amount / 1000;
@@ -2424,11 +2566,12 @@ function buildFormulaExportRows(formula, volume) {
 }
 
 function exportFormulaWorkbook(formula, volume, rows) {
+  const volumeUnit = formula.amountUnit === "kg" ? "kg" : "L";
   const data = [
     ["FertiCal 配方导出"],
     ["方案", formula.name],
     ["来源建议", formula.sourceSuggestionName || formula.name],
-    ["AB肥配制量", `${volume} L`],
+    [formula.amountUnit === "kg" ? "配方总量" : "AB肥配制量", `${volume} ${volumeUnit}`],
     ["导出时间", new Date().toLocaleString("zh-CN")],
     [],
     ["桶", "肥料", "用量 kg", "备注"],
@@ -2439,15 +2582,16 @@ function exportFormulaWorkbook(formula, volume, rows) {
     const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "配方");
-    XLSX.writeFile(wb, `FertiCal-配方-${formula.id}-${volume}L-${dateStamp()}.xlsx`);
+    XLSX.writeFile(wb, `FertiCal-配方-${formula.id}-${volume}${volumeUnit}-${dateStamp()}.xlsx`);
     return;
   }
 
   const csv = data.map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
-  downloadTextFile(`FertiCal-配方-${formula.id}-${volume}L-${dateStamp()}.csv`, "\ufeff" + csv, "text/csv;charset=utf-8");
+  downloadTextFile(`FertiCal-配方-${formula.id}-${volume}${volumeUnit}-${dateStamp()}.csv`, "\ufeff" + csv, "text/csv;charset=utf-8");
 }
 
 function exportFormulaPdf(formula, volume, rows) {
+  const volumeUnit = formula.amountUnit === "kg" ? "kg" : "L";
   const html = `
     <!doctype html>
     <html lang="zh-CN">
@@ -2466,7 +2610,7 @@ function exportFormulaPdf(formula, volume, rows) {
       </head>
       <body>
         <h1>FertiCal 配方导出</h1>
-        <p>方案：${escapeHtml(formula.name)} · 来源建议：${escapeHtml(formula.sourceSuggestionName || formula.name)} · AB肥配制量：${volume} L · ${escapeHtml(new Date().toLocaleString("zh-CN"))}</p>
+        <p>方案：${escapeHtml(formula.name)} · 来源建议：${escapeHtml(formula.sourceSuggestionName || formula.name)} · ${formula.amountUnit === "kg" ? "配方总量" : "AB肥配制量"}：${volume} ${volumeUnit} · ${escapeHtml(new Date().toLocaleString("zh-CN"))}</p>
         <table>
           <thead><tr><th>桶</th><th>肥料</th><th>用量</th><th>备注</th></tr></thead>
           <tbody>
@@ -2489,17 +2633,18 @@ function exportFormulaPdf(formula, volume, rows) {
   const url = URL.createObjectURL(blob);
   const win = window.open(url, "_blank");
   if (!win) {
-    downloadTextFile(`FertiCal-配方-${formula.id}-${volume}L-${dateStamp()}.html`, html, "text/html;charset=utf-8");
+    downloadTextFile(`FertiCal-配方-${formula.id}-${volume}${volumeUnit}-${dateStamp()}.html`, html, "text/html;charset=utf-8");
   }
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
-function recordFormulaAdjustment(suggestion, formula) {
+function recordFormulaAdjustment(suggestion, formula, mode = APP_MODE) {
   const record = {
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
     suggestionId: suggestion.id,
     suggestionName: suggestion.name,
+    mode,
     cropType: state.cropType,
     tanks: {
       aVolume: getNumericField("aTankVolume"),
@@ -2531,6 +2676,36 @@ function recordFormulaAdjustment(suggestion, formula) {
   } catch (error) {
     console.warn("Formula adjustment record was not saved", error);
   }
+}
+
+function readFormulaAdjustmentRecords() {
+  try {
+    const records = JSON.parse(localStorage.getItem("fertical-formula-adjustments-v1") || "[]");
+    return Array.isArray(records) ? records : [];
+  } catch (error) {
+    console.warn("Formula preference records could not be read", error);
+    return [];
+  }
+}
+
+function getLearnedFertilizerPreferences(targetMode) {
+  const scores = new Map();
+  readFormulaAdjustmentRecords().slice(-100).forEach((record) => {
+    const rows = [...(record.final?.bucketA || []), ...(record.final?.bucketB || [])];
+    const total = rows.reduce((sum, row) => sum + Math.max(0, Number(row.amountKg) || 0), 0) || 1;
+    rows.forEach((row) => {
+      const share = Math.max(0, Number(row.amountKg) || 0) / total;
+      scores.set(row.fertilizerId, (scores.get(row.fertilizerId) || 0) + Math.min(share, 0.5));
+    });
+    (record.differences || []).forEach((diff) => {
+      const scale = Math.max(0.05, Number(diff.suggestedKg) || Number(diff.finalKg) || 0.05);
+      const signal = Math.max(-1, Math.min(1, (Number(diff.deltaKg) || 0) / scale));
+      scores.set(diff.fertilizerId, (scores.get(diff.fertilizerId) || 0) + signal * 0.35);
+    });
+  });
+  const divisor = targetMode === 3 ? 5 : 6;
+  scores.forEach((value, key) => scores.set(key, Math.max(-1, Math.min(1, value / divisor))));
+  return scores;
 }
 
 function normalizeFormulaRows(rows) {
@@ -2599,8 +2774,7 @@ function dateStamp() {
 }
 
 function calculateReverse() {
-  const statusEl = document.querySelector("#calcStatus");
-  if (statusEl) statusEl.textContent = "正在生成配方建议...";
+  setStatus("正在生成配方建议...");
   clearMode2CalculationResult();
 
   const suggestions = generateReverseSuggestions();
@@ -2608,18 +2782,15 @@ function calculateReverse() {
   state.selectedReverseIndex = null;
   updateBucketGridVisibility();
   if (!suggestions.length) {
-    if (statusEl) {
-      statusEl.textContent = getActiveReverseTargets().length
-        ? "当前目标与库存约束下暂未生成可用配方，请调整目标或开放更多原料"
-        : "请先设置至少一个高于原水背景的目标浓度";
-    }
+    setStatus(getActiveReverseTargets().length
+      ? "当前目标与库存约束下暂未生成可用配方，请调整目标或开放更多原料"
+      : "请先设置至少一个高于原水背景的目标浓度");
     renderReverseSuggestions([]);
     return;
   }
 
   renderReverseSuggestions(suggestions);
-  _statusHoldUntil = Date.now() + 2500;
-  if (statusEl) statusEl.textContent = `已生成 ${suggestions.length} 个配方建议，请选择一个采用`;
+  setStatus(`已生成 ${suggestions.length} 个配方建议，请选择一个采用`, 2500);
 }
 
 function generateReverseSuggestions() {
@@ -2647,12 +2818,14 @@ function generateReverseSuggestions() {
 
 function buildReverseProfiles() {
   const preferences = state.reversePreferences;
+  const learnedPreferences = getLearnedFertilizerPreferences(2);
   const common = {
     exclude: getPreferenceExcludedFertilizers(preferences),
     acidPenalty: getPreferenceAcidPenalty(preferences),
     tracePreference: preferences.traceChelate,
     ironStrategy: preferences.ironStrategy,
-    phFloor: preferences.ironStrategy === "high-ph" ? 6.5 : null
+    phFloor: preferences.ironStrategy === "high-ph" ? 6.5 : null,
+    learnedPreferences
   };
   const costMultiplier = preferences.costPriority === "low"
     ? 1.8
@@ -2760,9 +2933,9 @@ function buildReverseSuggestionWithAcidPlan(profile, acidPlan) {
   const target = activeTargets.map((item) => item.need * item.weight);
 
   if (profile.rowPenalty) {
-    variables.forEach((_, index) => {
+    variables.forEach((variable, index) => {
       const row = Array(variables.length).fill(0);
-      row[index] = profile.rowPenalty;
+      row[index] = profile.rowPenalty * learnedPreferenceMultiplier(profile, variable.fertilizer.id);
       matrix.push(row);
       target.push(0);
     });
@@ -2771,7 +2944,8 @@ function buildReverseSuggestionWithAcidPlan(profile, acidPlan) {
   if (profile.costPenalty) {
     variables.forEach((variable, index) => {
       const row = Array(variables.length).fill(0);
-      row[index] = profile.costPenalty * normalizedFertilizerPrice(variable.fertilizer.id);
+      row[index] = profile.costPenalty * normalizedFertilizerPrice(variable.fertilizer.id) *
+        learnedPreferenceMultiplier(profile, variable.fertilizer.id);
       matrix.push(row);
       target.push(0);
     });
@@ -3117,11 +3291,11 @@ function reverseTargetWeight(key) {
 }
 
 function getFertilizerPrice(fertilizerId) {
-  return TEST_FERTILIZER_PRICES[fertilizerId] ?? DEFAULT_FERTILIZER_PRICE;
+  return MARKET_PRICE_BY_FERTILIZER[fertilizerId] ?? DEFAULT_FERTILIZER_PRICE;
 }
 
 function normalizedFertilizerPrice(fertilizerId) {
-  return getFertilizerPrice(fertilizerId) / AVERAGE_TEST_FERTILIZER_PRICE;
+  return getFertilizerPrice(fertilizerId) / AVERAGE_FERTILIZER_PRICE;
 }
 
 function solveNonNegativeLeastSquares(matrix, target) {
@@ -3203,6 +3377,7 @@ function evaluateReverseSuggestion(profile, bucketA, bucketB) {
     (bucketA.length + bucketB.length) * 0.04 +
     nitricAcidRegulatoryScore(bucketA, bucketB) +
     preferenceAcidScore(profile, bucketA, bucketB) +
+    learnedFormulaPreferenceScore(profile, bucketA, bucketB) +
     costScore;
 
   return {
@@ -3219,6 +3394,20 @@ function evaluateReverseSuggestion(profile, bucketA, bucketB) {
     estimatedCost,
     score
   };
+}
+
+function learnedPreferenceMultiplier(profile, fertilizerId) {
+  const preference = profile.learnedPreferences?.get(fertilizerId) || 0;
+  return Math.max(0.7, Math.min(1.25, 1 - preference * 0.3));
+}
+
+function learnedFormulaPreferenceScore(profile, bucketA, bucketB) {
+  const rows = [...bucketA, ...bucketB];
+  const total = rows.reduce((sum, row) => sum + Math.max(0, Number(row.amount) || 0), 0) || 1;
+  return rows.reduce((score, row) => {
+    const preference = profile.learnedPreferences?.get(row.fertilizerId) || 0;
+    return score - preference * Math.min((Number(row.amount) || 0) / total, 0.5) * 0.8;
+  }, 0);
 }
 
 function nitricAcidRegulatoryScore(bucketA, bucketB) {
@@ -3723,17 +3912,13 @@ function applyReverseSuggestion(suggestion, index = null) {
     showMode2CalculationResult(true);
     renderCurrentCalculation();
     renderReverseSuggestions(state.reverseSuggestions);
-    _statusHoldUntil = Date.now() + 2500;
-    const statusEl = document.querySelector("#calcStatus");
-    if (statusEl) statusEl.textContent = `已采用「${suggestion.name}」，可继续点其他方案比较`;
+    setStatus(`已采用「${suggestion.name}」，可继续点其他方案比较`, 2500);
     return;
   }
 
-  clearTimeout(_recalcTimer);
-  _doRecalculate();
-  const statusEl = document.querySelector("#calcStatus");
-  _statusHoldUntil = Date.now() + 2500;
-  if (statusEl) statusEl.textContent = `已采用「${suggestion.name}」`;
+  clearTimeout(recalcTimer);
+  recalculateNow();
+  setStatus(`已采用「${suggestion.name}」`, 2500);
 }
 
 function clearReverseSelection() {
@@ -3776,10 +3961,12 @@ function openModeModules(mode) {
   });
 
   const modeModules = mode === 1
-    ? ["waterSection", "importPanel", "resultsSection", "calibrationSection"]
+    ? ["resultsSection", "calibrationSection"]
     : mode === 2
-      ? ["waterSection", "mode2TargetSection", "resultsSection"]
-      : [];
+      ? ["resultsSection"]
+      : mode === 3
+        ? ["mode3ResultsSection"]
+        : [];
 
   modeModules.forEach((id) => {
     setModuleCollapsed(document.getElementById(id), false);
@@ -3789,10 +3976,13 @@ function openModeModules(mode) {
     document.querySelectorAll("#bucketGrid .module-panel").forEach((panel) => {
       setModuleCollapsed(panel, false);
     });
+    setModuleCollapsed(document.getElementById("formulaExportPanel"), false);
   } else if (mode === 2 && state.selectedReverseIndex != null) {
     document.querySelectorAll("#bucketGrid .module-panel").forEach((panel) => {
       setModuleCollapsed(panel, false);
     });
+    setModuleCollapsed(document.getElementById("formulaExportPanel"), false);
+  } else if (mode === 3 && state.selectedSoilIndex != null) {
     setModuleCollapsed(document.getElementById("formulaExportPanel"), false);
   }
 }
@@ -3804,8 +3994,12 @@ function updateBucketGridVisibility() {
   const shouldShow = APP_MODE === 1 || (APP_MODE === 2 && state.selectedReverseIndex != null);
   bucketGrid.style.display = shouldShow ? "" : "none";
   if (formulaExportPanel) {
-    formulaExportPanel.style.display = APP_MODE === 2 && state.selectedReverseIndex != null ? "" : "none";
+    const showExport = APP_MODE === 1 ||
+      (APP_MODE === 2 && state.selectedReverseIndex != null) ||
+      (APP_MODE === 3 && state.selectedSoilIndex != null);
+    formulaExportPanel.style.display = showExport ? "" : "none";
   }
+  renderFormulaAdjustmentEditor();
 }
 
 function positionModePanels() {
@@ -3815,11 +4009,14 @@ function positionModePanels() {
   const resultsSection = document.getElementById("resultsSection");
   const reverseSuggestions = document.getElementById("reverseSuggestions");
   const resultGrid = document.getElementById("resultGrid");
+  const mode3ResultsSection = document.getElementById("mode3ResultsSection");
   if (!bucketGrid || !formulaExportPanel || !mode2TargetSection || !resultsSection) return;
 
   if (APP_MODE === 2) {
     if (reverseSuggestions) reverseSuggestions.after(bucketGrid);
     if (resultGrid) resultGrid.before(formulaExportPanel);
+  } else if (APP_MODE === 3) {
+    if (mode3ResultsSection) mode3ResultsSection.after(formulaExportPanel);
   } else {
     mode2TargetSection.before(bucketGrid);
     bucketGrid.after(formulaExportPanel);
@@ -3834,9 +4031,7 @@ function clearMode2CalculationResult() {
   if (precipList) precipList.innerHTML = "";
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// 后端 API：本地直连 127.0.0.1:8765；服务器部署时建议由 Nginx 将 /api/ 反代到后端。
-// ═══════════════════════════════════════════════════════════════════
+// 本地打开页面时直连后端；线上部署时让 /api 走同源反代。
 const API_BASE = (() => {
   const host = window.location.hostname;
   const isLocalPage = window.location.protocol === "file:" ||
@@ -3859,31 +4054,394 @@ async function apiFetch(path, options = {}) {
   return res.json();
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// 应用模式管理（0: 未选择 / 1: 计算浓度 / 2: 设计配方）
-// ═══════════════════════════════════════════════════════════════════
+const SOIL_FORMULA_PROFILES = [
+  {
+    id: "natural-acid",
+    name: "天然酸性优先",
+    note: "磷酸脲配合硝酸钾，尽量保留硫酸铵的生理酸性作用",
+    sources: ["urea-phosphate", "kno3", "k2so4", "urea"],
+    ammoniumNShare: 0.25
+  },
+  {
+    id: "kh2po4",
+    name: "磷酸二氢钾优先",
+    note: "以 KH₂PO₄ 同时供应磷钾，配方直观、低氯",
+    sources: ["kh2po4", "k2so4", "urea", "kno3"],
+    ammoniumNShare: 0.20
+  },
+  {
+    id: "economy",
+    name: "经济简洁方案",
+    note: "优先减少成本与原料品种；允许氯时可采用氯化钾",
+    sources: ["kh2po4", "kcl", "kno3", "urea", "k2so4"]
+  }
+];
+
+function getSoilInput(id) {
+  return Math.max(0, Number(document.getElementById(id)?.value) || 0);
+}
+
+function soilNpkContent(fertilizer) {
+  const content = { N: 0, p2o5: 0, k2o: 0, S: 0, Cl: 0 };
+  fertilizer.compounds.forEach((compound) => {
+    if (["N", "NO3-N", "NH4-N"].includes(compound.element)) content.N += compound.percent;
+    if (compound.element === "P") content.p2o5 += compound.percent * P_TO_P2O5_FACTOR;
+    if (compound.element === "K") content.k2o += compound.percent * K_TO_K2O_FACTOR;
+    if (compound.element === "S") content.S += compound.percent;
+    if (compound.element === "Cl") content.Cl += compound.percent;
+  });
+  return content;
+}
+
+function getSoilFertilizerBucket(fertilizer) {
+  const elements = new Set(fertilizer.compounds.map((compound) => compound.element));
+  const hasCalcium = elements.has("Ca");
+  const hasSulfateOrPhosphate = elements.has("S") || elements.has("P");
+  if (hasCalcium && hasSulfateOrPhosphate) return null;
+  if (hasCalcium) return "A";
+  if (hasSulfateOrPhosphate) return "B";
+  return "A";
+}
+
+function generateSoilFormulas() {
+  const targets = {
+    N: getSoilInput("soilTargetN"),
+    p2o5: getSoilInput("soilTargetP2O5"),
+    k2o: getSoilInput("soilTargetK2O")
+  };
+  const batch = getSoilInput("soilBatchWeight");
+  const applicationRate = getSoilInput("soilApplicationRate");
+  const chloridePreference = document.getElementById("soilChloridePreference")?.value || "avoid";
+  const status = document.getElementById("soilFormulaStatus");
+  const root = document.getElementById("soilFormulaSuggestions");
+  const resultsPanel = document.getElementById("mode3ResultsSection");
+  if (!root || !status) return;
+
+  if (!batch || !applicationRate || !(targets.N + targets.p2o5 + targets.k2o)) {
+    state.soilSuggestions = [];
+    state.selectedSoilIndex = null;
+    state.soilAdjustedRows = [];
+    updateBucketGridVisibility();
+    root.innerHTML = "";
+    status.textContent = "请填写配制总量、每吨水施肥量和至少一个 NPK 目标。";
+    if (resultsPanel) resultsPanel.style.display = "none";
+    return;
+  }
+
+  if (resultsPanel) {
+    resultsPanel.style.display = "";
+    setModuleCollapsed(resultsPanel, false);
+  }
+
+  const learnedPreferences = getLearnedFertilizerPreferences(3);
+  const suggestions = SOIL_FORMULA_PROFILES
+    .map((profile) => solveSoilFormula(profile, targets, batch, applicationRate, chloridePreference))
+    .filter(Boolean)
+    .sort((a, b) => soilLearnedPreferenceScore(b, learnedPreferences) - soilLearnedPreferenceScore(a, learnedPreferences));
+
+  if (!suggestions.length) {
+    state.soilSuggestions = [];
+    state.selectedSoilIndex = null;
+    state.soilAdjustedRows = [];
+    updateBucketGridVisibility();
+    root.innerHTML = "";
+    status.textContent = "当前原水、投肥量与原料约束下，没有方案能进入目标 ±20% 范围。请调整目标、提高投肥量或开放含氯方案。";
+    return;
+  }
+
+  const sourceText = state.lastWaterSource ? ` · 原水：${state.lastWaterSource}` : " · 原水：手动录入";
+  state.soilSuggestions = suggestions;
+  state.selectedSoilIndex = null;
+  state.soilAdjustedRows = [];
+  updateBucketGridVisibility();
+  status.textContent = `目标 ${formatSoilGrade(targets)} · ${formatNumber(applicationRate)} kg肥/吨水 · 按 ${formatNumber(batch)} kg 配制${sourceText}`;
+  root.innerHTML = suggestions.map((suggestion, index) => renderSoilFormulaCard(suggestion, index)).join("");
+  root.querySelectorAll("[data-apply-soil-suggestion]").forEach((button) => {
+    button.addEventListener("click", () => applySoilSuggestion(Number(button.dataset.applySoilSuggestion)));
+  });
+}
+
+function soilLearnedPreferenceScore(suggestion, preferences) {
+  const total = suggestion.rows.reduce((sum, row) => sum + row.amount, 0) || 1;
+  return suggestion.rows.reduce((score, row) =>
+    score + (preferences.get(row.fertilizer.id) || 0) * Math.min(row.amount / total, 0.5), 0);
+}
+
+function getRawWaterNpkKg(batch, applicationRate) {
+  const waterTonnes = batch / applicationRate;
+  const totalN = state.water.N > 0
+    ? state.water.N
+    : (state.water["NO3-N"] || 0) + (state.water["NH4-N"] || 0);
+  return {
+    N: totalN * waterTonnes * 0.001,
+    p2o5: (state.water.P || 0) * P_TO_P2O5_FACTOR * waterTonnes * 0.001,
+    k2o: (state.water.K || 0) * K_TO_K2O_FACTOR * waterTonnes * 0.001
+  };
+}
+
+function solveSoilFormula(profile, targets, batch, applicationRate, chloridePreference) {
+  const preferredShare = Math.max(0, Number(profile.ammoniumNShare) || 0);
+  const candidateShares = preferredShare > 0
+    ? [1, 0.75, 0.5, 0.25, 0].map((ratio) => preferredShare * ratio)
+    : [0];
+  for (const ammoniumNShare of candidateShares) {
+    const suggestion = solveSoilFormulaAtAmmoniumShare(
+      profile, targets, batch, applicationRate, chloridePreference, ammoniumNShare
+    );
+    if (suggestion) return suggestion;
+  }
+  return null;
+}
+
+function solveSoilFormulaAtAmmoniumShare(
+  profile, targets, batch, applicationRate, chloridePreference, ammoniumNShare
+) {
+  let sourceIds = [...profile.sources];
+  if (chloridePreference === "avoid") sourceIds = sourceIds.filter((id) => id !== "kcl");
+  const rawWaterKg = getRawWaterNpkKg(batch, applicationRate);
+  const targetKg = [
+    Math.max(0, targets.N * batch / 100 - rawWaterKg.N),
+    Math.max(0, targets.p2o5 * batch / 100 - rawWaterKg.p2o5),
+    Math.max(0, targets.k2o * batch / 100 - rawWaterKg.k2o)
+  ];
+  const fixedRows = [];
+  if (ammoniumNShare > 0 && targetKg[0] > 0) {
+    const fertilizer = getFertilizer("ammonium-sulfate");
+    const nitrogenFraction = soilNpkContent(fertilizer).N / 100;
+    const amount = targetKg[0] * ammoniumNShare / nitrogenFraction;
+    fixedRows.push({ fertilizer, amount });
+    targetKg[0] -= amount * nitrogenFraction;
+  }
+  const sources = sourceIds.map(getFertilizer);
+  const matrix = ["N", "p2o5", "k2o"].map((key) =>
+    sources.map((fertilizer) => soilNpkContent(fertilizer)[key] / 100)
+  );
+  const solution = solveNonNegativeLeastSquares(matrix, targetKg);
+  if (!solution) return null;
+
+  const rows = fixedRows.concat(solution
+    .map((amount, index) => ({ fertilizer: sources[index], amount: Math.max(0, amount) }))
+    .filter((row) => row.amount >= 0.005))
+    .map((row) => ({ ...row, bucket: getSoilFertilizerBucket(row.fertilizer) }));
+  if (rows.some((row) => !row.bucket)) return null;
+  const used = rows.reduce((sum, row) => sum + row.amount, 0);
+  if (used > batch + 0.05) return null;
+
+  const actualKg = {
+    N: rawWaterKg.N,
+    p2o5: rawWaterKg.p2o5,
+    k2o: rawWaterKg.k2o,
+    S: 0,
+    Cl: 0
+  };
+  rows.forEach((row) => {
+    const content = soilNpkContent(row.fertilizer);
+    Object.keys(actualKg).forEach((key) => {
+      actualKg[key] += row.amount * content[key] / 100;
+    });
+  });
+  const actual = Object.fromEntries(
+    Object.entries(actualKg).map(([key, value]) => [key, value / batch * 100])
+  );
+  const deviation = {};
+  ["N", "p2o5", "k2o"].forEach((key) => {
+    deviation[key] = targets[key] > 0 ? (actual[key] - targets[key]) / targets[key] : 0;
+  });
+  const maxDeviation = Math.max(...Object.values(deviation).map(Math.abs));
+  if (maxDeviation > 0.200001) return null;
+
+  const filler = Math.max(0, batch - used);
+  const cost = rows.reduce((sum, row) => sum + row.amount * getFertilizerPrice(row.fertilizer.id), 0);
+  const acidIndex = rows.reduce((sum, row) => {
+    const factor = row.fertilizer.id === "ammonium-sulfate" ? 2
+      : row.fertilizer.id === "urea-phosphate" ? 1.5
+        : row.fertilizer.id === "kh2po4" ? 0.7
+          : row.fertilizer.id === "urea" ? 0.35 : 0;
+    return sum + row.amount * factor;
+  }, 0) / batch;
+  const acidTendency = acidIndex >= 0.35 ? "较强" : acidIndex >= 0.12 ? "中等" : "温和";
+
+  const rawWaterGrade = Object.fromEntries(
+    Object.entries(rawWaterKg).map(([key, value]) => [key, value / batch * 100])
+  );
+  return {
+    ...profile,
+    rows,
+    filler,
+    actual,
+    deviation,
+    rawWaterGrade,
+    cost,
+    acidTendency,
+    batch,
+    applicationRate
+  };
+}
+
+function formatSoilGrade(values) {
+  return `${formatNumber(values.N)}-${formatNumber(values.p2o5)}-${formatNumber(values.k2o)}`;
+}
+
+function renderSoilBucket(suggestion, bucket) {
+  const bucketRows = suggestion.rows.filter((row) => row.bucket === bucket);
+  const bucketWeight = bucketRows.reduce((sum, row) => sum + row.amount, 0);
+  const dose = bucketWeight / suggestion.batch * suggestion.applicationRate;
+  const title = bucket === "A" ? "A 桶 · 钙/氮组" : "B 桶 · 磷/硫/钾组";
+  const items = bucketRows.length
+    ? bucketRows.map((row) => `
+        <tr><td>${escapeHtml(row.fertilizer.name)}</td><td>${formatNumber(row.amount)} kg</td></tr>
+      `).join("")
+    : '<tr><td colspan="2">本方案无需额外原料</td></tr>';
+  return `
+    <div class="suggestion-bucket">
+      <b>${title}</b>
+      <span class="muted">折合 ${formatNumber(dose)} kg/吨水</span>
+      <table class="soil-formula-table">
+        <thead><tr><th>原料</th><th>每批用量</th></tr></thead>
+        <tbody>${items}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderSoilFormulaCard(suggestion, index) {
+  const fillerText = suggestion.filler > 0.005
+    ? `配方余量 ${formatNumber(suggestion.filler)} kg 由载体或母液水补足，不作为肥盐加入同一浓缩桶。`
+    : "本方案无需载体余量。";
+  const deviationText = [
+    ["N", "N"],
+    ["p2o5", "P₂O₅"],
+    ["k2o", "K₂O"]
+  ].map(([key, label]) => {
+    const value = suggestion.deviation[key] * 100;
+    return `${label} ${value >= 0 ? "+" : ""}${formatNumber(value)}%`;
+  }).join(" · ");
+  const rawWaterText = formatSoilGrade(suggestion.rawWaterGrade);
+  const rawPhText = state.water.pH > 0 ? ` · 原水 pH ${formatNumber(state.water.pH)}` : "";
+  return `
+    <article class="suggestion-card${state.selectedSoilIndex === index ? " is-selected" : ""}">
+      <h4><span>${escapeHtml(suggestion.name)}</span><span class="soil-grade">${formatSoilGrade(suggestion.actual)}</span></h4>
+      <div class="suggestion-meta">${escapeHtml(suggestion.note)}</div>
+      <div class="suggestion-buckets">
+        ${renderSoilBucket(suggestion, "A")}
+        ${renderSoilBucket(suggestion, "B")}
+      </div>
+      <div class="suggestion-meta">
+        <b>A、B 浓缩液必须分开配制和注入。</b> ${fillerText}<br>
+        偏差：<span class="soil-grade">${deviationText}</span><br>
+        原水折算贡献 ${rawWaterText} · S ${formatNumber(suggestion.actual.S)}% · Cl ${formatNumber(suggestion.actual.Cl)}%<br>
+        酸化倾向：${suggestion.acidTendency}${rawPhText} · 估算原料 ¥${formatCurrency(suggestion.cost)}
+      </div>
+      <button class="${state.selectedSoilIndex === index ? "btn-ghost" : "btn-a"}" type="button" data-apply-soil-suggestion="${index}">
+        ${state.selectedSoilIndex === index ? "已采用，可在下方微调" : "采用并微调"}
+      </button>
+    </article>
+  `;
+}
+
+function applySoilSuggestion(index) {
+  const suggestion = state.soilSuggestions[index];
+  if (!suggestion) return;
+  state.selectedSoilIndex = index;
+  state.soilAdjustedRows = suggestion.rows.map((row) => ({
+    bucket: row.bucket,
+    fertilizerId: row.fertilizer.id,
+    amount: Number(row.amount) || 0
+  }));
+  const root = document.getElementById("soilFormulaSuggestions");
+  if (root) {
+    root.innerHTML = state.soilSuggestions.map((item, itemIndex) => renderSoilFormulaCard(item, itemIndex)).join("");
+    root.querySelectorAll("[data-apply-soil-suggestion]").forEach((button) => {
+      button.addEventListener("click", () => applySoilSuggestion(Number(button.dataset.applySoilSuggestion)));
+    });
+  }
+  updateBucketGridVisibility();
+  positionModePanels();
+  renderFormulaAdjustmentEditor();
+  setModuleCollapsed(document.getElementById("formulaExportPanel"), false);
+  setStatus(`已采用「${suggestion.name}」，可微调用量后导出`, 2500);
+}
+
+function soilRowsToFormulaRows(rows) {
+  return rows.map((row) => ({
+    id: crypto.randomUUID(),
+    fertilizerId: row.fertilizerId,
+    amount: Number(row.amount) || 0,
+    unit: "kg"
+  }));
+}
+
+function soilSuggestionToFormula(suggestion) {
+  return {
+    id: suggestion.id,
+    name: suggestion.name,
+    bucketA: soilRowsToFormulaRows(suggestion.rows.filter((row) => row.bucket === "A").map((row) => ({ ...row, fertilizerId: row.fertilizer.id }))),
+    bucketB: soilRowsToFormulaRows(suggestion.rows.filter((row) => row.bucket === "B").map((row) => ({ ...row, fertilizerId: row.fertilizer.id })))
+  };
+}
+
+function renderFormulaAdjustmentEditor() {
+  const editor = document.getElementById("formulaAdjustmentEditor");
+  const label = document.getElementById("formulaExportVolumeLabel");
+  const description = document.getElementById("formulaExportDescription");
+  if (!editor) return;
+  if (APP_MODE !== 3 || state.selectedSoilIndex == null) {
+    editor.innerHTML = "";
+    if (label) label.textContent = "AB肥配制量";
+    if (description) description.textContent = "确认 A/B 桶微调后的用量，导出当前配方并记录为后续推荐偏好";
+    return;
+  }
+  if (label) label.textContent = "配方总量";
+  if (description) description.textContent = "微调土壤配方各原料用量，导出后记录为后续推荐偏好";
+  editor.innerHTML = `
+    <div class="table-wrap">
+      <table class="soil-formula-table">
+        <thead><tr><th>桶</th><th>原料</th><th>每批用量 (kg)</th></tr></thead>
+        <tbody>${state.soilAdjustedRows.map((row, index) => `
+          <tr>
+            <td>${escapeHtml(row.bucket)}</td>
+            <td>${escapeHtml(getFertilizer(row.fertilizerId).name)}</td>
+            <td><input data-soil-adjustment="${index}" type="number" min="0" step="0.01" value="${Number(row.amount).toFixed(4)}"></td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
+function syncSoilAdjustedRowsFromEditor() {
+  document.querySelectorAll("[data-soil-adjustment]").forEach((input) => {
+    const row = state.soilAdjustedRows[Number(input.dataset.soilAdjustment)];
+    if (row) row.amount = Math.max(0, Number(input.value) || 0);
+  });
+}
 
 function setMode(mode) {
   APP_MODE = mode;
 
   document.querySelector("#modeBtn1")?.classList.toggle("is-active", mode === 1);
   document.querySelector("#modeBtn2")?.classList.toggle("is-active", mode === 2);
+  document.querySelector("#modeBtn3")?.classList.toggle("is-active", mode === 3);
 
-  const anyMode = mode > 0;
   const isMode1 = mode === 1;
   const isMode2 = mode === 2;
+  const isMode3 = mode === 3;
+  const usesWater = isMode1 || isMode2 || isMode3;
+  const showsLiquidResults = isMode1 || isMode2;
 
   const show = (id, visible) => {
     const el = document.getElementById(id);
     if (el) el.style.display = visible ? "" : "none";
   };
 
-  show("waterSection",        anyMode);
+  show("waterSection",        usesWater);
   show("importPanel",         isMode1);
   updateBucketGridVisibility();
   positionModePanels();
+  renderFormulaAdjustmentEditor();
   show("mode2TargetSection",  isMode2);
-  show("resultsSection",      anyMode);
+  show("mode3SoilSection",    isMode3);
+  show("mode3ResultsSection", isMode3 && state.soilSuggestions.length > 0);
+  show("resultsSection",      showsLiquidResults);
   show("calibrationSection",  isMode1);
 
   show("resultsModeBar",   isMode1);
@@ -3896,11 +4454,13 @@ function setMode(mode) {
   const heroText = document.querySelector("#heroText");
   if (heroText) {
     if (isMode1) {
-      heroText.innerHTML = '上传水质检测报告，导入或手动配置 <span class="a-text">A 桶</span> 与 <span class="b-text">B 桶</span> 施肥配方。实时计算灌溉液元素浓度，可选填目标值查看偏差。';
+      heroText.innerHTML = '请上传最近一次灌溉用水成分分析报告，导入或手动配置 <span class="a-text">A 桶</span> 与 <span class="b-text">B 桶</span> 施肥配方。实时计算灌溉液元素浓度，可选填目标值查看偏差。';
     } else if (isMode2) {
-      heroText.innerHTML = '上传水质检测报告，设定各元素目标浓度，系统自动推荐 3 套施肥配方供选择。采用任一方案后可直接比较最终工作液浓度，再导出选中的配方。';
+      heroText.innerHTML = '请上传最近一次灌溉用水成分分析报告，设定各元素目标浓度，系统自动推荐 3 套施肥配方供选择。采用任一方案后可直接比较最终工作液浓度，再导出选中的配方。';
+    } else if (isMode3) {
+      heroText.innerHTML = '上传原水检测报告，以目标 N-P₂O₅-K₂O 百分比代替逐元素浓度，生成适合土壤种植的多套方案；最终结果允许 ±20% 偏差。';
     } else {
-      heroText.textContent = "请选择左侧功能模式开始使用。";
+      heroText.textContent = "请选择适合当前任务的功能：核算已有施肥配方、按目标元素设计水肥配方，或按 N-P₂O₅-K₂O 生成土壤施肥方案。";
     }
   }
 
@@ -3923,29 +4483,26 @@ function setMode(mode) {
   const sugEl = document.getElementById("reverseSuggestions");
   if (sugEl) { sugEl.innerHTML = ""; sugEl.classList.remove("is-visible"); }
   if (isMode2) renderTargetTable();
-
-  if (anyMode) recalculate();
+  if (usesWater) recalculate();
 }
 
 function bindModeEvents() {
   document.querySelector("#modeBtn1")?.addEventListener("click", () => setMode(1));
   document.querySelector("#modeBtn2")?.addEventListener("click", () => setMode(2));
+  document.querySelector("#modeBtn3")?.addEventListener("click", () => setMode(3));
+  document.querySelector("#generateSoilFormulas")?.addEventListener("click", generateSoilFormulas);
 
   document.querySelector("#targetFileM2")?.addEventListener("change", handleTargetUpload);
 
-  document.querySelector("#targetPreset2")?.addEventListener("change", (e) => {
+  targetPreset2?.addEventListener("change", (e) => {
     applyTargetPreset(e.target.value);
-    const p1 = document.querySelector("#targetPreset");
-    if (p1) p1.value = e.target.value;
+    if (targetPreset) targetPreset.value = e.target.value;
   });
 
   document.querySelector("#clearTargets2")?.addEventListener("click", () => {
     clearReverseSelection();
     clearTargets();
-    ["#targetPreset", "#targetPreset2"].forEach((sel) => {
-      const el = document.querySelector(sel);
-      if (el) el.value = "";
-    });
+    resetTargetPresetSelects();
     renderTargetTable();
     recalculate();
   });
